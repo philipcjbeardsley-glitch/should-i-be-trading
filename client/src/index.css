@@ -1,0 +1,215 @@
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Bloomberg Terminal — Deep navy/black with phosphor green accents */
+    --background: 220 20% 6%;
+    --foreground: 210 15% 88%;
+
+    --card: 220 18% 9%;
+    --card-foreground: 210 15% 88%;
+
+    --popover: 220 18% 9%;
+    --popover-foreground: 210 15% 88%;
+
+    --primary: 165 80% 45%;
+    --primary-foreground: 220 20% 6%;
+
+    --secondary: 220 15% 16%;
+    --secondary-foreground: 210 15% 78%;
+
+    --muted: 220 15% 14%;
+    --muted-foreground: 210 12% 55%;
+
+    --accent: 165 80% 45%;
+    --accent-foreground: 220 20% 6%;
+
+    --destructive: 0 70% 55%;
+    --destructive-foreground: 210 15% 88%;
+
+    --border: 220 15% 18%;
+    --input: 220 18% 12%;
+    --ring: 165 80% 45%;
+
+    --radius: 0.25rem;
+
+    /* Bloomberg custom tokens */
+    --bb-green: #00d4a0;
+    --bb-green-dim: #007a5c;
+    --bb-red: #ff4d4d;
+    --bb-red-dim: #8b1a1a;
+    --bb-amber: #ffa500;
+    --bb-amber-dim: #7a4a00;
+    --bb-blue: #4da6ff;
+    --bb-yellow: #ffe566;
+    --bb-surface: hsl(220 18% 9%);
+    --bb-surface-2: hsl(220 16% 12%);
+    --bb-surface-3: hsl(220 14% 15%);
+    --bb-border: hsl(220 15% 20%);
+    --bb-text: hsl(210 15% 88%);
+    --bb-text-dim: hsl(210 10% 60%);
+    --bb-text-faint: hsl(210 8% 40%);
+    --font-mono: 'IBM Plex Mono', 'Courier New', monospace;
+    --font-sans: 'IBM Plex Sans', 'Helvetica Neue', sans-serif;
+  }
+
+  .dark {
+    --background: 220 20% 6%;
+    --foreground: 210 15% 88%;
+    --card: 220 18% 9%;
+    --card-foreground: 210 15% 88%;
+    --popover: 220 18% 9%;
+    --popover-foreground: 210 15% 88%;
+    --primary: 165 80% 45%;
+    --primary-foreground: 220 20% 6%;
+    --secondary: 220 15% 16%;
+    --secondary-foreground: 210 15% 78%;
+    --muted: 220 15% 14%;
+    --muted-foreground: 210 12% 55%;
+    --accent: 165 80% 45%;
+    --accent-foreground: 220 20% 6%;
+    --destructive: 0 70% 55%;
+    --destructive-foreground: 210 15% 88%;
+    --border: 220 15% 18%;
+    --input: 220 18% 12%;
+    --ring: 165 80% 45%;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    margin: 0;
+    padding: 0;
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
+  }
+
+  #root {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+}
+
+@layer utilities {
+  .font-mono { font-family: var(--font-mono) !important; }
+  .font-sans { font-family: var(--font-sans) !important; }
+
+  .text-bb-green { color: var(--bb-green); }
+  .text-bb-red { color: var(--bb-red); }
+  .text-bb-amber { color: var(--bb-amber); }
+  .text-bb-blue { color: var(--bb-blue); }
+  .text-bb-yellow { color: var(--bb-yellow); }
+  .text-bb-dim { color: var(--bb-text-dim); }
+  .text-bb-faint { color: var(--bb-text-faint); }
+
+  .bg-bb-surface { background: var(--bb-surface); }
+  .bg-bb-surface-2 { background: var(--bb-surface-2); }
+  .bg-bb-surface-3 { background: var(--bb-surface-3); }
+  .border-bb { border-color: var(--bb-border); }
+
+  .scanline {
+    position: relative;
+  }
+  .scanline::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.03) 2px,
+      rgba(0,0,0,0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 100;
+  }
+
+  .glow-green {
+    text-shadow: 0 0 10px rgba(0, 212, 160, 0.6), 0 0 20px rgba(0, 212, 160, 0.3);
+  }
+  .glow-red {
+    text-shadow: 0 0 10px rgba(255, 77, 77, 0.6), 0 0 20px rgba(255, 77, 77, 0.3);
+  }
+  .glow-amber {
+    text-shadow: 0 0 10px rgba(255, 165, 0, 0.6), 0 0 20px rgba(255, 165, 0, 0.3);
+  }
+
+  .num { font-variant-numeric: tabular-nums lining-nums; }
+
+  .panel {
+    background: var(--bb-surface);
+    border: 1px solid var(--bb-border);
+    border-radius: 2px;
+    padding: 12px 14px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .panel-label {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--bb-text-faint);
+    margin-bottom: 6px;
+  }
+
+  .ticker-scroll {
+    display: flex;
+    animation: ticker-move 60s linear infinite;
+    white-space: nowrap;
+  }
+
+  @keyframes ticker-move {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+
+  .pulse-dot {
+    animation: pulse-anim 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-anim {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  .score-ring {
+    transition: stroke-dashoffset 1.5s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .fade-in {
+    animation: fade-in 0.6s ease forwards;
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .bar-fill {
+    transition: width 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  .skeleton {
+    background: linear-gradient(90deg, hsl(220 15% 14%) 25%, hsl(220 15% 18%) 50%, hsl(220 15% 14%) 75%);
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.5s ease-in-out infinite;
+    border-radius: 2px;
+  }
+
+  @keyframes skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+  }
+}
