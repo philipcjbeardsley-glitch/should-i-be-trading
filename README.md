@@ -13,7 +13,7 @@ A Bloomberg Terminal-style market dashboard that evaluates the current stock mar
 ## Quick Start
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/should-i-be-trading.git
+git clone https://github.com/philipcjbeardsley-glitch/should-i-be-trading.git
 cd should-i-be-trading
 npm install
 npm run dev
