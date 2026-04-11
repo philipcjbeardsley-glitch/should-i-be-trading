@@ -120,6 +120,7 @@ export default function ThemeTracker() {
   const [timePeriod, setTimePeriod] = useState<TimePeriod>("today");
   const [snapshotView, setSnapshotView] = useState<SnapshotView>("sp500");
   const [cotContract, setCotContract] = useState("ES");
+  const [expandedTheme, setExpandedTheme] = useState<string | null>(null);
 
   const { data: themeData, isLoading: themesLoading } = useQuery<any>({
     queryKey: ["/api/themes"],
@@ -225,17 +226,24 @@ export default function ThemeTracker() {
                 </tr>
               </thead>
               <tbody>
-                {(themeData?.themes ?? []).map((theme: any) => {
+{(themeData?.themes ?? []).map((theme: any) => {
                   const perfValue = theme[timePeriod];
                   const maxPerf = Math.max(...(themeData?.themes ?? []).map((t: any) => Math.abs(t[timePeriod])), 1);
                   const barWidth = Math.abs(perfValue) / maxPerf * 100;
+                  const isExpanded = expandedTheme === theme.id;
+                  const constituents: string[] = theme.constituents ?? [];
                   return (
-                    <tr key={theme.id} style={{ borderBottom: "1px solid hsl(220 15% 11%)", cursor: "pointer" }}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = "hsl(220 15% 10%)")}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                    <>
+                    <tr key={theme.id}
+                      style={{ borderBottom: "1px solid hsl(220 15% 11%)", cursor: "pointer",
+                        background: isExpanded ? "hsl(220 18% 10%)" : "transparent" }}
+                      onClick={() => setExpandedTheme(isExpanded ? null : theme.id)}
+                      onMouseEnter={(e) => { if (!isExpanded) e.currentTarget.style.background = "hsl(220 15% 10%)"; }}
+                      onMouseLeave={(e) => { if (!isExpanded) e.currentTarget.style.background = "transparent"; }}
                     >
                       <td style={{ padding: "8px 14px" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 9, color: isExpanded ? "var(--bb-green)" : "var(--bb-text-faint)", transition: "transform 0.15s", display: "inline-block", transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)" }}>▶</span>
                           <span className="font-mono" style={{ fontSize: 11, fontWeight: 600, color: "var(--bb-text)" }}>{theme.name}</span>
                           <span className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>{theme.symbol}</span>
                         </div>
@@ -256,6 +264,26 @@ export default function ThemeTracker() {
                         </td>
                       ))}
                     </tr>
+                    {isExpanded && constituents.length > 0 && (
+                      <tr key={`${theme.id}-expanded`} style={{ background: "hsl(220 20% 7%)", borderBottom: "2px solid var(--bb-green)" }}>
+                        <td colSpan={6} style={{ padding: "10px 14px 12px 38px" }}>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                            {constituents.map((ticker: string) => (
+                              <span key={ticker} className="font-mono" style={{
+                                fontSize: 10, fontWeight: 600,
+                                padding: "3px 9px", borderRadius: 2,
+                                background: "rgba(0,212,160,0.08)",
+                                border: "1px solid rgba(0,212,160,0.2)",
+                                color: "var(--bb-text)",
+                                cursor: "default",
+                                letterSpacing: "0.05em",
+                              }}>{ticker}</span>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    </>
                   );
                 })}
               </tbody>

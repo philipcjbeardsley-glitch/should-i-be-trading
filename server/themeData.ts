@@ -12,6 +12,30 @@ function setCached(key: string, data: any) {
   cache.set(key, { data, timestamp: Date.now() });
 }
 
+// Constituent stocks for each theme — shown when user clicks a theme row
+export const THEME_CONSTITUENTS: Record<string, string[]> = {
+  semiconductors: ["NVDA", "AMD", "AVGO", "QCOM", "INTC", "MU", "AMAT", "LRCX", "KLAC", "MRVL", "TSM", "ASML", "SNPS", "CDNS", "TXN"],
+  ai:             ["NVDA", "MSFT", "GOOGL", "META", "AMD", "PLTR", "ARM", "AI", "SOUN", "BBAI", "BIGB", "UPST", "PATH", "CFLT"],
+  datacenters:    ["EQIX", "DLR", "AMT", "CCI", "QTS", "CONE", "NVDA", "ANET", "CSCO", "JNPR"],
+  cybersecurity:  ["CRWD", "PANW", "ZS", "FTNT", "NET", "S", "OKTA", "CYBR", "TENB", "RPD", "QLYS", "VRNS"],
+  cloud:          ["AMZN", "MSFT", "GOOGL", "CRM", "NOW", "SNOW", "DDOG", "MDB", "ESTC", "HUBS", "WDAY", "VEEV"],
+  biotech:        ["LLY", "MRNA", "REGN", "VRTX", "BIIB", "GILD", "AMGN", "ALNY", "SGEN", "INCY", "IONS", "EXAS"],
+  cleanenergy:    ["ENPH", "SEDG", "FSLR", "NEE", "BEP", "PLUG", "BLNK", "CHPT", "RUN", "ARRY", "NOVA", "SPWR"],
+  gold:           ["NEM", "GOLD", "AEM", "KGC", "AGI", "FNV", "WPM", "PAAS", "EQX", "HL", "CDE", "USAS"],
+  silver:         ["SLV", "PAAS", "CDE", "HL", "MAG", "SILV", "EXK", "GPL", "AXU"],
+  oil:            ["XOM", "CVX", "COP", "SLB", "EOG", "OXY", "DVN", "FANG", "MRO", "HAL", "BKR", "APA"],
+  realestate:     ["PLD", "AMT", "EQIX", "CCI", "SPG", "PSA", "O", "DLR", "WELL", "AVB", "EQR", "VTR"],
+  banking:        ["JPM", "BAC", "WFC", "GS", "MS", "C", "USB", "PNC", "TFC", "CFG", "FITB", "HBAN"],
+  retail:         ["AMZN", "WMT", "TGT", "COST", "HD", "LOW", "TJX", "ROST", "BURL", "FIVE", "DG", "DLTR"],
+  construction:   ["DHI", "LEN", "PHM", "TOL", "NVR", "KBH", "MDC", "MHO", "TMHC", "BLD", "SHW", "MAS"],
+  defense:        ["LMT", "RTX", "NOC", "GD", "BA", "HII", "L3H", "TDG", "LDOS", "DRS", "CACI", "KTOS"],
+  cannabis:       ["CURLF", "TCNNF", "GTBIF", "CRLBF", "AYRWF", "VRNOF", "FLWPF", "JUSHF"],
+  lithium:        ["ALB", "SQM", "LAC", "PLL", "LTHM", "SGML", "ALTM", "MP", "NOVS"],
+  uranium:        ["CCJ", "NXE", "DNN", "URG", "EU", "UUUU", "BQSSF", "PALAF"],
+  shipping:       ["ZIM", "MATX", "SBLK", "GOGL", "STNG", "INSW", "DHT", "FRO", "NAT", "EGLE"],
+  ev:             ["TSLA", "RIVN", "LCID", "NIO", "LI", "XPEV", "FSR", "GOEV", "WKHS", "AYRO"],
+};
+
 // Theme/industry group definitions with representative ETFs/tickers
 const THEME_GROUPS: Record<string, { name: string; symbols: string[] }> = {
   semiconductors: { name: "Semiconductors", symbols: ["SMH", "SOXX"] },
@@ -143,7 +167,8 @@ export async function fetchThemeTrackerData() {
       oneMonth: calcPerformance(closes, 21) ?? 0,
       threeMonth: calcPerformance(closes, 63) ?? 0,
       ytd: calcPerformance(closes, Math.min(closes.length - 1, 80)) ?? 0,
-      adr: 0, // Would need intraday data
+      adr: 0,
+      constituents: THEME_CONSTITUENTS[key] ?? [],
     };
   });
 
