@@ -1,7 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
-import { useState, useEffect, useRef } from "react";
-import { RefreshCw, Activity, TrendingUp, TrendingDown, Minus, AlertTriangle, Zap, BarChart2, Globe, Layers } from "lucide-react";
+import { useState, useEffect } from "react";
+import { RefreshCw, Activity, TrendingUp, TrendingDown, Minus, AlertTriangle, Zap, BarChart2, Globe, Layers, Brain, LineChart, Grid3x3, Crosshair } from "lucide-react";
+import MacroIntelligence from "@/components/MacroIntelligence";
+import ThemeTracker from "@/components/ThemeTracker";
+import BreadthTab from "@/components/BreadthTab";
+import SetupsTab from "@/components/SetupsTab";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 interface SectorData {
@@ -21,6 +25,8 @@ interface DashboardData {
   scoring: { categories: { name: string; weight: number; score: number; weighted: number }[] };
   cached?: boolean;
 }
+
+type MainTab = "pulse" | "macro" | "themes" | "breadth" | "setups";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const SECTOR_NAMES: Record<string, string> = {
@@ -224,9 +230,19 @@ function ScoreBar({ category }: { category: { name: string; weight: number; scor
 // ─── Mode Toggle ──────────────────────────────────────────────────────────────
 type TradingMode = "swing" | "day";
 
+// ─── Tab Config ───────────────────────────────────────────────────────────────
+const TABS: { key: MainTab; label: string; icon: React.ReactNode }[] = [
+  { key: "pulse", label: "Market Pulse", icon: <Activity size={12} /> },
+  { key: "macro", label: "Macro Intelligence", icon: <Brain size={12} /> },
+  { key: "themes", label: "Theme Tracker", icon: <LineChart size={12} /> },
+  { key: "breadth", label: "Breadth", icon: <Grid3x3 size={12} /> },
+  { key: "setups", label: "Setups", icon: <Crosshair size={12} /> },
+];
+
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [mode, setMode] = useState<TradingMode>("swing");
+  const [activeTab, setActiveTab] = useState<MainTab>("pulse");
   const [isUpdating, setIsUpdating] = useState(false);
   const refreshInterval = 45 * 1000;
 
@@ -334,208 +350,251 @@ export default function Dashboard() {
         </div>
       )}
 
+      {/* ── Tab Navigation ── */}
+      <div style={{ background: "hsl(220 22% 7%)", borderBottom: "1px solid var(--bb-border)", padding: "0 14px", display: "flex", gap: 0, flexShrink: 0, overflowX: "auto" }}>
+        {TABS.map(tab => (
+          <button
+            key={tab.key}
+            data-testid={`tab-${tab.key}`}
+            onClick={() => setActiveTab(tab.key)}
+            className="font-mono"
+            style={{
+              fontSize: 10, padding: "8px 16px", cursor: "pointer", border: "none",
+              background: "transparent",
+              color: activeTab === tab.key ? "var(--bb-green)" : "var(--bb-text-faint)",
+              fontWeight: activeTab === tab.key ? 600 : 400,
+              letterSpacing: "0.08em",
+              borderBottom: activeTab === tab.key ? "2px solid var(--bb-green)" : "2px solid transparent",
+              display: "flex", alignItems: "center", gap: 6,
+              transition: "all 0.15s ease",
+              whiteSpace: "nowrap",
+            }}
+          >
+            <span style={{ opacity: activeTab === tab.key ? 1 : 0.5 }}>{tab.icon}</span>
+            {tab.label.toUpperCase()}
+          </button>
+        ))}
+      </div>
+
       {/* ── Main scrollable content ── */}
       <div style={{ flex: 1, overflow: "auto", overscrollBehavior: "contain" }}>
-        {isLoading && <Skeleton />}
-        {error && !data && (
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", flexDirection: "column", gap: 12 }}>
-            <span style={{ color: "var(--bb-red)", fontSize: 12 }} className="font-mono">MARKET DATA UNAVAILABLE</span>
-            <span style={{ color: "var(--bb-text-faint)", fontSize: 10 }} className="font-mono">Check connection or try refreshing</span>
-            <button onClick={handleRefresh} className="font-mono" style={{ fontSize: 10, padding: "6px 14px", border: "1px solid var(--bb-border)", borderRadius: 2, background: "none", color: "var(--bb-text-dim)", cursor: "pointer" }}>RETRY</button>
-          </div>
-        )}
-        {data && (
-          <div style={{ padding: "12px 12px 20px", display: "grid", gap: 10, gridTemplateColumns: "repeat(12, 1fr)", gridAutoRows: "auto" }}>
+        {/* Market Pulse tab (original dashboard) */}
+        {activeTab === "pulse" && (
+          <>
+            {isLoading && <Skeleton />}
+            {error && !data && (
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", flexDirection: "column", gap: 12 }}>
+                <span style={{ color: "var(--bb-red)", fontSize: 12 }} className="font-mono">MARKET DATA UNAVAILABLE</span>
+                <span style={{ color: "var(--bb-text-faint)", fontSize: 10 }} className="font-mono">Check connection or try refreshing</span>
+                <button onClick={handleRefresh} className="font-mono" style={{ fontSize: 10, padding: "6px 14px", border: "1px solid var(--bb-border)", borderRadius: 2, background: "none", color: "var(--bb-text-dim)", cursor: "pointer" }}>RETRY</button>
+              </div>
+            )}
+            {data && (
+              <div style={{ padding: "12px 12px 20px", display: "grid", gap: 10, gridTemplateColumns: "repeat(12, 1fr)", gridAutoRows: "auto" }}>
 
-            {/* ── Hero Panel — spans 4 cols ── */}
-            <div className="panel fade-in" style={{ gridColumn: "span 4", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "20px 16px", gap: 12 }}>
-              <div className="panel-label" style={{ marginBottom: 0, alignSelf: "flex-start" }}>TRADING DECISION · {modeLabel}</div>
-              <DecisionBadge decision={data.decision} />
-              <ScoreRing score={data.marketQualityScore} label="MARKET QUALITY" size={160} />
-              <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
-                <div style={{ textAlign: "center" }}>
-                  <div className="font-mono num" style={{ fontSize: 22, fontWeight: 700, color: scoreColor(data.execScore) }}>{data.execScore}</div>
-                  <div className="panel-label" style={{ marginBottom: 0 }}>EXEC WINDOW</div>
-                </div>
-                <div style={{ width: 1, height: 32, background: "var(--bb-border)" }} />
-                <div style={{ textAlign: "center" }}>
-                  <div className="font-mono" style={{ fontSize: 11, fontWeight: 600, color: data.trend.regime === "uptrend" ? "var(--bb-green)" : data.trend.regime === "downtrend" ? "var(--bb-red)" : "var(--bb-amber)", letterSpacing: "0.06em", textTransform: "uppercase" }}>{data.trend.regime}</div>
-                  <div className="panel-label" style={{ marginBottom: 0 }}>REGIME</div>
-                </div>
-              </div>
-            </div>
-
-            {/* ── Terminal Analysis ── */}
-            <div className="panel fade-in" style={{ gridColumn: "span 8", display: "flex", flexDirection: "column", minHeight: 0, alignSelf: "start" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
-                <Zap size={11} style={{ color: "var(--bb-text-faint)" }} />
-                <span className="panel-label" style={{ marginBottom: 0 }}>TERMINAL ANALYSIS</span>
-              </div>
-              <div className="font-mono" style={{ fontSize: 11, lineHeight: 1.7, color: "var(--bb-text)", flex: 1 }}>
-                {data.analysis}
-              </div>
-              {/* Score summary chips */}
-              <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                {data.scoring.categories.map(cat => (
-                  <div key={cat.name} style={{ display: "flex", alignItems: "center", gap: 5, background: "hsl(220 15% 12%)", border: "1px solid var(--bb-border)", borderRadius: 2, padding: "3px 8px" }}>
-                    <span className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)", letterSpacing: "0.08em" }}>{cat.name.toUpperCase().split("/")[0]}</span>
-                    <span className="font-mono num" style={{ fontSize: 9, fontWeight: 600, color: scoreColor(cat.score) }}>{cat.score}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* ── Volatility Panel ── */}
-            <div style={{ gridColumn: "span 3" }}>
-            <Panel title="Volatility" icon={<Activity size={11} />} score={data.volatility.score} direction={data.volatility.direction} health={data.volatility.health}>
-              <div>
-                <div style={{ marginBottom: 8 }}>
-                  <div className="font-mono num" style={{ fontSize: 24, fontWeight: 700, color: scoreColor(data.volatility.score), lineHeight: 1 }}>{fmt(data.volatility.vix.level, 1)}</div>
-                  <div className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)" }}>VIX — {data.volatility.interpretation.toUpperCase()}</div>
-                </div>
-                <StatRow label="VIX 5d Slope" value={fmtPct(data.volatility.vix.slope5d, 1)} valueColor={data.volatility.vix.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)"} />
-                <StatRow label="VIX Percentile (1yr)" value={`${data.volatility.vix.percentile}th`} />
-                {data.volatility.vvix && <StatRow label="VVIX" value={fmt(data.volatility.vvix, 1)} />}
-                <StatRow label="P/C Ratio Est." value={fmt(data.volatility.putCallEstimate, 2)} valueColor={data.volatility.putCallEstimate > 1.1 ? "var(--bb-red)" : "var(--bb-green)"} />
-              </div>
-            </Panel>
-            </div>
-
-            {/* ── Trend Panel ── */}
-            <div style={{ gridColumn: "span 3" }}>
-            <Panel title="Trend & Structure" icon={<TrendingUp size={11} />} score={data.trend.score} direction={data.trend.direction} health={data.trend.health}>
-              <div>
-                <div style={{ marginBottom: 8, display: "flex", gap: 16 }}>
-                  <div>
-                    <div className="font-mono num" style={{ fontSize: 18, fontWeight: 700, color: data.trend.spy.change >= 0 ? "var(--bb-green)" : "var(--bb-red)", lineHeight: 1 }}>
-                      {fmt(data.trend.spy.price, 2)}
+                {/* ── Hero Panel — spans 4 cols ── */}
+                <div className="panel fade-in" style={{ gridColumn: "span 4", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "20px 16px", gap: 12 }}>
+                  <div className="panel-label" style={{ marginBottom: 0, alignSelf: "flex-start" }}>TRADING DECISION · {modeLabel}</div>
+                  <DecisionBadge decision={data.decision} />
+                  <ScoreRing score={data.marketQualityScore} label="MARKET QUALITY" size={160} />
+                  <div style={{ display: "flex", gap: 20, alignItems: "center" }}>
+                    <div style={{ textAlign: "center" }}>
+                      <div className="font-mono num" style={{ fontSize: 22, fontWeight: 700, color: scoreColor(data.execScore) }}>{data.execScore}</div>
+                      <div className="panel-label" style={{ marginBottom: 0 }}>EXEC WINDOW</div>
                     </div>
-                    <div className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>SPY {fmtPct(data.trend.spy.change, 1)}</div>
-                  </div>
-                  <div>
-                    <div className="font-mono num" style={{ fontSize: 18, fontWeight: 700, color: data.trend.qqq.change >= 0 ? "var(--bb-green)" : "var(--bb-red)", lineHeight: 1 }}>
-                      {fmt(data.trend.qqq.price, 2)}
+                    <div style={{ width: 1, height: 32, background: "var(--bb-border)" }} />
+                    <div style={{ textAlign: "center" }}>
+                      <div className="font-mono" style={{ fontSize: 11, fontWeight: 600, color: data.trend.regime === "uptrend" ? "var(--bb-green)" : data.trend.regime === "downtrend" ? "var(--bb-red)" : "var(--bb-amber)", letterSpacing: "0.06em", textTransform: "uppercase" }}>{data.trend.regime}</div>
+                      <div className="panel-label" style={{ marginBottom: 0 }}>REGIME</div>
                     </div>
-                    <div className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>QQQ {fmtPct(data.trend.qqq.change, 1)}</div>
                   </div>
                 </div>
-                <StatRow label="SPY vs 20MA" value={data.trend.spy.ma20 ? (data.trend.spy.price ?? 0) > data.trend.spy.ma20 ? `✓ ${fmt(data.trend.spy.ma20, 2)}` : `✗ ${fmt(data.trend.spy.ma20, 2)}` : "—"} valueColor={(data.trend.spy.price ?? 0) > (data.trend.spy.ma20 ?? 0) ? "var(--bb-green)" : "var(--bb-red)"} />
-                <StatRow label="SPY vs 50MA" value={data.trend.spy.ma50 ? (data.trend.spy.price ?? 0) > data.trend.spy.ma50 ? `✓ ${fmt(data.trend.spy.ma50, 2)}` : `✗ ${fmt(data.trend.spy.ma50, 2)}` : "—"} valueColor={(data.trend.spy.price ?? 0) > (data.trend.spy.ma50 ?? 0) ? "var(--bb-green)" : "var(--bb-red)"} />
-                <StatRow label="SPY vs 200MA" value={data.trend.spy.ma200 ? (data.trend.spy.price ?? 0) > data.trend.spy.ma200 ? `✓ ${fmt(data.trend.spy.ma200, 2)}` : `✗ ${fmt(data.trend.spy.ma200, 2)}` : "—"} valueColor={(data.trend.spy.price ?? 0) > (data.trend.spy.ma200 ?? 0) ? "var(--bb-green)" : "var(--bb-red)"} />
-                <StatRow label="QQQ vs 50MA" value={data.trend.qqq.ma50 ? (data.trend.qqq.price ?? 0) > data.trend.qqq.ma50 ? `✓ ${fmt(data.trend.qqq.ma50, 2)}` : `✗ ${fmt(data.trend.qqq.ma50, 2)}` : "—"} valueColor={(data.trend.qqq.price ?? 0) > (data.trend.qqq.ma50 ?? 0) ? "var(--bb-green)" : "var(--bb-red)"} />
-                <StatRow
-                  label="RSI (14d)"
-                  value={fmt(data.trend.rsi, 1)}
-                  valueColor={(data.trend.rsi ?? 50) > 70 ? "var(--bb-amber)" : (data.trend.rsi ?? 50) < 30 ? "var(--bb-red)" : "var(--bb-green)"}
-                  sub={(data.trend.rsi ?? 50) > 70 ? "OVERBOUGHT" : (data.trend.rsi ?? 50) < 30 ? "OVERSOLD" : undefined}
-                />
-              </div>
-            </Panel>
-            </div>
 
-            {/* ── Breadth Panel ── */}
-            <div style={{ gridColumn: "span 3" }}>
-            <Panel title="Market Breadth" icon={<BarChart2 size={11} />} score={data.breadth.score} direction={data.breadth.direction} health={data.breadth.health}>
-              <div>
-                <div style={{ marginBottom: 8 }}>
-                  <span className="font-mono num" style={{ fontSize: 22, fontWeight: 700, color: scoreColor(data.breadth.pctAbove50), lineHeight: 1 }}>{data.breadth.pctAbove50}%</span>
-                  <span className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)", marginLeft: 6 }}>ABOVE 50MA</span>
+                {/* ── Terminal Analysis ── */}
+                <div className="panel fade-in" style={{ gridColumn: "span 8", display: "flex", flexDirection: "column", minHeight: 0, alignSelf: "start" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+                    <Zap size={11} style={{ color: "var(--bb-text-faint)" }} />
+                    <span className="panel-label" style={{ marginBottom: 0 }}>TERMINAL ANALYSIS</span>
+                  </div>
+                  <div className="font-mono" style={{ fontSize: 11, lineHeight: 1.7, color: "var(--bb-text)", flex: 1 }}>
+                    {data.analysis}
+                  </div>
+                  {/* Score summary chips */}
+                  <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+                    {data.scoring.categories.map(cat => (
+                      <div key={cat.name} style={{ display: "flex", alignItems: "center", gap: 5, background: "hsl(220 15% 12%)", border: "1px solid var(--bb-border)", borderRadius: 2, padding: "3px 8px" }}>
+                        <span className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)", letterSpacing: "0.08em" }}>{cat.name.toUpperCase().split("/")[0]}</span>
+                        <span className="font-mono num" style={{ fontSize: 9, fontWeight: 600, color: scoreColor(cat.score) }}>{cat.score}</span>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                {[
-                  { label: "% Above 20MA", val: `${data.breadth.pctAbove20}%` },
-                  { label: "% Above 50MA", val: `${data.breadth.pctAbove50}%` },
-                  { label: "% Above 200MA", val: `${data.breadth.pctAbove200}%` },
-                  { label: "A/D Ratio (est.)", val: fmt(data.breadth.adRatio, 2) },
-                  { label: "McClellan Osc.", val: fmt(data.breadth.mcclellan, 0) },
-                ].map(r => (
-                  <StatRow key={r.label} label={r.label} value={r.val} />
-                ))}
-              </div>
-            </Panel>
-            </div>
 
-            {/* ── Momentum Panel ── */}
-            <div style={{ gridColumn: "span 3" }}>
-            <Panel title="Momentum & Participation" icon={<Zap size={11} />} score={data.momentum.score} direction={data.momentum.direction} health={data.momentum.health}>
-              <div>
-                <div style={{ marginBottom: 8 }}>
-                  <span className="font-mono num" style={{ fontSize: 22, fontWeight: 700, color: scoreColor(Math.round(data.momentum.positiveSectors / 11 * 100)), lineHeight: 1 }}>{data.momentum.positiveSectors}<span style={{ fontSize: 12, fontWeight: 400 }}>/11</span></span>
-                  <span className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)", marginLeft: 6 }}>POSITIVE SECTORS</span>
-                </div>
-                <StatRow label="Sector Spread (5d)" value={fmtPct(data.momentum.sectorSpread, 1)} valueColor={data.momentum.sectorSpread < 8 ? "var(--bb-green)" : data.momentum.sectorSpread < 15 ? "var(--bb-amber)" : "var(--bb-red)"} />
-                <StatRow label="Leaders (5d)" value={data.topSectors.map(s=>s.symbol).join(", ")} valueColor="var(--bb-green)" />
-                <StatRow label="Laggards (5d)" value={data.bottomSectors.map(s=>s.symbol).join(", ")} valueColor="var(--bb-red)" />
-              </div>
-            </Panel>
-            </div>
-
-            {/* ── Macro Panel ── */}
-            <div style={{ gridColumn: "span 3" }}>
-            <Panel title="Macro & Liquidity" icon={<Globe size={11} />} score={data.macro.score} direction={data.macro.direction} health={data.macro.health}>
-              <div>
-                <div style={{ marginBottom: 8, display: "flex", gap: 16 }}>
+                {/* ── Volatility Panel ── */}
+                <div style={{ gridColumn: "span 3" }}>
+                <Panel title="Volatility" icon={<Activity size={11} />} score={data.volatility.score} direction={data.volatility.direction} health={data.volatility.health}>
                   <div>
-                    <div className="font-mono num" style={{ fontSize: 18, fontWeight: 700, color: data.macro.tnx.level && data.macro.tnx.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)", lineHeight: 1 }}>{fmt(data.macro.tnx.level, 2)}%</div>
-                    <div className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>10YR YIELD</div>
+                    <div style={{ marginBottom: 8 }}>
+                      <div className="font-mono num" style={{ fontSize: 24, fontWeight: 700, color: scoreColor(data.volatility.score), lineHeight: 1 }}>{fmt(data.volatility.vix.level, 1)}</div>
+                      <div className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)" }}>VIX — {data.volatility.interpretation.toUpperCase()}</div>
+                    </div>
+                    <StatRow label="VIX 5d Slope" value={fmtPct(data.volatility.vix.slope5d, 1)} valueColor={data.volatility.vix.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)"} />
+                    <StatRow label="VIX Percentile (1yr)" value={`${data.volatility.vix.percentile}th`} />
+                    {data.volatility.vvix && <StatRow label="VVIX" value={fmt(data.volatility.vvix, 1)} />}
+                    <StatRow label="P/C Ratio Est." value={fmt(data.volatility.putCallEstimate, 2)} valueColor={data.volatility.putCallEstimate > 1.1 ? "var(--bb-red)" : "var(--bb-green)"} />
+                  </div>
+                </Panel>
+                </div>
+
+                {/* ── Trend Panel ── */}
+                <div style={{ gridColumn: "span 3" }}>
+                <Panel title="Trend & Structure" icon={<TrendingUp size={11} />} score={data.trend.score} direction={data.trend.direction} health={data.trend.health}>
+                  <div>
+                    <div style={{ marginBottom: 8, display: "flex", gap: 16 }}>
+                      <div>
+                        <div className="font-mono num" style={{ fontSize: 18, fontWeight: 700, color: data.trend.spy.change >= 0 ? "var(--bb-green)" : "var(--bb-red)", lineHeight: 1 }}>
+                          {fmt(data.trend.spy.price, 2)}
+                        </div>
+                        <div className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>SPY {fmtPct(data.trend.spy.change, 1)}</div>
+                      </div>
+                      <div>
+                        <div className="font-mono num" style={{ fontSize: 18, fontWeight: 700, color: data.trend.qqq.change >= 0 ? "var(--bb-green)" : "var(--bb-red)", lineHeight: 1 }}>
+                          {fmt(data.trend.qqq.price, 2)}
+                        </div>
+                        <div className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>QQQ {fmtPct(data.trend.qqq.change, 1)}</div>
+                      </div>
+                    </div>
+                    <StatRow label="SPY vs 20MA" value={data.trend.spy.ma20 ? (data.trend.spy.price ?? 0) > data.trend.spy.ma20 ? `✓ ${fmt(data.trend.spy.ma20, 2)}` : `✗ ${fmt(data.trend.spy.ma20, 2)}` : "—"} valueColor={(data.trend.spy.price ?? 0) > (data.trend.spy.ma20 ?? 0) ? "var(--bb-green)" : "var(--bb-red)"} />
+                    <StatRow label="SPY vs 50MA" value={data.trend.spy.ma50 ? (data.trend.spy.price ?? 0) > data.trend.spy.ma50 ? `✓ ${fmt(data.trend.spy.ma50, 2)}` : `✗ ${fmt(data.trend.spy.ma50, 2)}` : "—"} valueColor={(data.trend.spy.price ?? 0) > (data.trend.spy.ma50 ?? 0) ? "var(--bb-green)" : "var(--bb-red)"} />
+                    <StatRow label="SPY vs 200MA" value={data.trend.spy.ma200 ? (data.trend.spy.price ?? 0) > data.trend.spy.ma200 ? `✓ ${fmt(data.trend.spy.ma200, 2)}` : `✗ ${fmt(data.trend.spy.ma200, 2)}` : "—"} valueColor={(data.trend.spy.price ?? 0) > (data.trend.spy.ma200 ?? 0) ? "var(--bb-green)" : "var(--bb-red)"} />
+                    <StatRow label="QQQ vs 50MA" value={data.trend.qqq.ma50 ? (data.trend.qqq.price ?? 0) > data.trend.qqq.ma50 ? `✓ ${fmt(data.trend.qqq.ma50, 2)}` : `✗ ${fmt(data.trend.qqq.ma50, 2)}` : "—"} valueColor={(data.trend.qqq.price ?? 0) > (data.trend.qqq.ma50 ?? 0) ? "var(--bb-green)" : "var(--bb-red)"} />
+                    <StatRow
+                      label="RSI (14d)"
+                      value={fmt(data.trend.rsi, 1)}
+                      valueColor={(data.trend.rsi ?? 50) > 70 ? "var(--bb-amber)" : (data.trend.rsi ?? 50) < 30 ? "var(--bb-red)" : "var(--bb-green)"}
+                      sub={(data.trend.rsi ?? 50) > 70 ? "OVERBOUGHT" : (data.trend.rsi ?? 50) < 30 ? "OVERSOLD" : undefined}
+                    />
+                  </div>
+                </Panel>
+                </div>
+
+                {/* ── Breadth Panel ── */}
+                <div style={{ gridColumn: "span 3" }}>
+                <Panel title="Market Breadth" icon={<BarChart2 size={11} />} score={data.breadth.score} direction={data.breadth.direction} health={data.breadth.health}>
+                  <div>
+                    <div style={{ marginBottom: 8 }}>
+                      <span className="font-mono num" style={{ fontSize: 22, fontWeight: 700, color: scoreColor(data.breadth.pctAbove50), lineHeight: 1 }}>{data.breadth.pctAbove50}%</span>
+                      <span className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)", marginLeft: 6 }}>ABOVE 50MA</span>
+                    </div>
+                    {[
+                      { label: "% Above 20MA", val: `${data.breadth.pctAbove20}%` },
+                      { label: "% Above 50MA", val: `${data.breadth.pctAbove50}%` },
+                      { label: "% Above 200MA", val: `${data.breadth.pctAbove200}%` },
+                      { label: "A/D Ratio (est.)", val: fmt(data.breadth.adRatio, 2) },
+                      { label: "McClellan Osc.", val: fmt(data.breadth.mcclellan, 0) },
+                    ].map(r => (
+                      <StatRow key={r.label} label={r.label} value={r.val} />
+                    ))}
+                  </div>
+                </Panel>
+                </div>
+
+                {/* ── Momentum Panel ── */}
+                <div style={{ gridColumn: "span 3" }}>
+                <Panel title="Momentum & Participation" icon={<Zap size={11} />} score={data.momentum.score} direction={data.momentum.direction} health={data.momentum.health}>
+                  <div>
+                    <div style={{ marginBottom: 8 }}>
+                      <span className="font-mono num" style={{ fontSize: 22, fontWeight: 700, color: scoreColor(Math.round(data.momentum.positiveSectors / 11 * 100)), lineHeight: 1 }}>{data.momentum.positiveSectors}<span style={{ fontSize: 12, fontWeight: 400 }}>/11</span></span>
+                      <span className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)", marginLeft: 6 }}>POSITIVE SECTORS</span>
+                    </div>
+                    <StatRow label="Sector Spread (5d)" value={fmtPct(data.momentum.sectorSpread, 1)} valueColor={data.momentum.sectorSpread < 8 ? "var(--bb-green)" : data.momentum.sectorSpread < 15 ? "var(--bb-amber)" : "var(--bb-red)"} />
+                    <StatRow label="Leaders (5d)" value={data.topSectors.map(s=>s.symbol).join(", ")} valueColor="var(--bb-green)" />
+                    <StatRow label="Laggards (5d)" value={data.bottomSectors.map(s=>s.symbol).join(", ")} valueColor="var(--bb-red)" />
+                  </div>
+                </Panel>
+                </div>
+
+                {/* ── Macro Panel ── */}
+                <div style={{ gridColumn: "span 3" }}>
+                <Panel title="Macro & Liquidity" icon={<Globe size={11} />} score={data.macro.score} direction={data.macro.direction} health={data.macro.health}>
+                  <div>
+                    <div style={{ marginBottom: 8, display: "flex", gap: 16 }}>
+                      <div>
+                        <div className="font-mono num" style={{ fontSize: 18, fontWeight: 700, color: data.macro.tnx.level && data.macro.tnx.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)", lineHeight: 1 }}>{fmt(data.macro.tnx.level, 2)}%</div>
+                        <div className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>10YR YIELD</div>
+                      </div>
+                      <div>
+                        <div className="font-mono num" style={{ fontSize: 18, fontWeight: 700, color: data.macro.dxy.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)", lineHeight: 1 }}>{fmt(data.macro.dxy.level, 2)}</div>
+                        <div className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>DXY</div>
+                      </div>
+                    </div>
+                    <StatRow label="TNX Trend (5d)" value={fmtPct(data.macro.tnx.slope5d, 1)} valueColor={data.macro.tnx.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)"} />
+                    <StatRow label="DXY Trend (5d)" value={fmtPct(data.macro.dxy.slope5d, 1)} valueColor={data.macro.dxy.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)"} />
+                    <StatRow label="Fed Stance" value={data.macro.fedStance.toUpperCase()} valueColor={data.macro.fedStance === "dovish" ? "var(--bb-green)" : data.macro.fedStance === "hawkish" ? "var(--bb-red)" : "var(--bb-amber)"} />
+                    <StatRow label="FOMC Next" value={data.macro.fomcNext ?? "—"} sub={data.macro.fomcDaysAway < 99 ? `${data.macro.fomcDaysAway}d away` : undefined} valueColor={data.macro.fomcImminent ? "var(--bb-amber)" : undefined} />
+                  </div>
+                </Panel>
+                </div>
+
+                {/* ── Sector Heatmap ── */}
+                <div className="panel fade-in" style={{ gridColumn: "span 6" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
+                    <Layers size={11} style={{ color: "var(--bb-text-faint)" }} />
+                    <span className="panel-label" style={{ marginBottom: 0 }}>SECTOR HEATMAP (5d PERFORMANCE)</span>
                   </div>
                   <div>
-                    <div className="font-mono num" style={{ fontSize: 18, fontWeight: 700, color: data.macro.dxy.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)", lineHeight: 1 }}>{fmt(data.macro.dxy.level, 2)}</div>
-                    <div className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>DXY</div>
+                    {[...data.sectors]
+                      .sort((a, b) => b.perf5d - a.perf5d)
+                      .map(s => (
+                        <SectorBar key={s.symbol} sector={s} max={maxSectorMove} />
+                      ))}
                   </div>
                 </div>
-                <StatRow label="TNX Trend (5d)" value={fmtPct(data.macro.tnx.slope5d, 1)} valueColor={data.macro.tnx.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)"} />
-                <StatRow label="DXY Trend (5d)" value={fmtPct(data.macro.dxy.slope5d, 1)} valueColor={data.macro.dxy.slope5d > 0 ? "var(--bb-red)" : "var(--bb-green)"} />
-                <StatRow label="Fed Stance" value={data.macro.fedStance.toUpperCase()} valueColor={data.macro.fedStance === "dovish" ? "var(--bb-green)" : data.macro.fedStance === "hawkish" ? "var(--bb-red)" : "var(--bb-amber)"} />
-                <StatRow label="FOMC Next" value={data.macro.fomcNext ?? "—"} sub={data.macro.fomcDaysAway < 99 ? `${data.macro.fomcDaysAway}d away` : undefined} valueColor={data.macro.fomcImminent ? "var(--bb-amber)" : undefined} />
-              </div>
-            </Panel>
-            </div>
 
-            {/* ── Sector Heatmap ── */}
-            <div className="panel fade-in" style={{ gridColumn: "span 6" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10 }}>
-                <Layers size={11} style={{ color: "var(--bb-text-faint)" }} />
-                <span className="panel-label" style={{ marginBottom: 0 }}>SECTOR HEATMAP (5d PERFORMANCE)</span>
-              </div>
-              <div>
-                {[...data.sectors]
-                  .sort((a, b) => b.perf5d - a.perf5d)
-                  .map(s => (
-                    <SectorBar key={s.symbol} sector={s} max={maxSectorMove} />
-                  ))}
-              </div>
-            </div>
+                {/* ── Scoring Breakdown ── */}
+                <div className="panel fade-in" style={{ gridColumn: "span 6" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <BarChart2 size={11} style={{ color: "var(--bb-text-faint)" }} />
+                      <span className="panel-label" style={{ marginBottom: 0 }}>SCORE BREAKDOWN</span>
+                    </div>
+                    <div className="font-mono num" style={{ fontSize: 22, fontWeight: 700, color: scoreColor(data.marketQualityScore) }}>{data.marketQualityScore}<span className="font-mono" style={{ fontSize: 10, color: "var(--bb-text-faint)" }}>/100</span></div>
+                  </div>
+                  {data.scoring.categories.map(cat => <ScoreBar key={cat.name} category={cat} />)}
+                  <div style={{ marginTop: 12, padding: "8px 0", borderTop: "1px solid var(--bb-border)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)" }}>EXECUTION WINDOW SCORE</span>
+                      <span className="font-mono num" style={{ fontSize: 11, fontWeight: 600, color: scoreColor(data.execScore) }}>{data.execScore}/100</span>
+                    </div>
+                    <div style={{ marginTop: 4, fontSize: 9, fontFamily: "var(--font-mono)", color: "var(--bb-text-faint)", lineHeight: 1.5 }}>
+                      {data.execScore >= 70 ? "Breakouts holding · Pullbacks being bought · Follow-through evident" :
+                       data.execScore >= 50 ? "Mixed execution · Selective setups recommended · Watch for volume" :
+                       "Poor follow-through · Breakouts failing · Avoid new entries"}
+                    </div>
+                  </div>
+                </div>
 
-            {/* ── Scoring Breakdown ── */}
-            <div className="panel fade-in" style={{ gridColumn: "span 6" }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <BarChart2 size={11} style={{ color: "var(--bb-text-faint)" }} />
-                  <span className="panel-label" style={{ marginBottom: 0 }}>SCORE BREAKDOWN</span>
-                </div>
-                <div className="font-mono num" style={{ fontSize: 22, fontWeight: 700, color: scoreColor(data.marketQualityScore) }}>{data.marketQualityScore}<span className="font-mono" style={{ fontSize: 10, color: "var(--bb-text-faint)" }}>/100</span></div>
               </div>
-              {data.scoring.categories.map(cat => <ScoreBar key={cat.name} category={cat} />)}
-              <div style={{ marginTop: 12, padding: "8px 0", borderTop: "1px solid var(--bb-border)" }}>
-                <div style={{ display: "flex", justifyContent: "space-between" }}>
-                  <span className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)" }}>EXECUTION WINDOW SCORE</span>
-                  <span className="font-mono num" style={{ fontSize: 11, fontWeight: 600, color: scoreColor(data.execScore) }}>{data.execScore}/100</span>
-                </div>
-                <div style={{ marginTop: 4, fontSize: 9, fontFamily: "var(--font-mono)", color: "var(--bb-text-faint)", lineHeight: 1.5 }}>
-                  {data.execScore >= 70 ? "Breakouts holding · Pullbacks being bought · Follow-through evident" :
-                   data.execScore >= 50 ? "Mixed execution · Selective setups recommended · Watch for volume" :
-                   "Poor follow-through · Breakouts failing · Avoid new entries"}
-                </div>
-              </div>
-            </div>
-
-          </div>
+            )}
+          </>
         )}
+
+        {/* Macro Intelligence tab */}
+        {activeTab === "macro" && <MacroIntelligence />}
+
+        {/* Theme Tracker tab */}
+        {activeTab === "themes" && <ThemeTracker />}
+
+        {/* Breadth tab */}
+        {activeTab === "breadth" && <BreadthTab />}
+
+        {/* Setups tab */}
+        {activeTab === "setups" && <SetupsTab />}
       </div>
 
       {/* ── Footer ── */}
       <footer style={{ background: "hsl(220 22% 7%)", borderTop: "1px solid var(--bb-border)", padding: "4px 14px", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
-        <span className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)", letterSpacing: "0.08em" }}>DATA: YAHOO FINANCE · REFRESHES EVERY 45S · NOT FINANCIAL ADVICE</span>
+        <span className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)", letterSpacing: "0.08em" }}>DATA: YAHOO FINANCE · FRED · CFTC · REFRESHES EVERY 45S · NOT FINANCIAL ADVICE</span>
         <span className="font-mono" style={{ fontSize: 8, color: "var(--bb-text-faint)" }}>SHOULD I BE TRADING? © 2026</span>
       </footer>
 
