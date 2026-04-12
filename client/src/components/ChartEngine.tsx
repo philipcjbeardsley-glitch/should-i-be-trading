@@ -1,68 +1,100 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+/**
+ * ChartEngine.tsx — Plotly-powered CMT-style dual-pane charts
+ * Visual target: macrocharts.com — price (top, ~35%), indicator (bottom, ~65%), shared x-axis
+ * Backend routes unchanged — only frontend rendering replaced.
+ */
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
+import Plot from "react-plotly.js";
 import {
-  ChevronDown, ChevronRight, RefreshCw, Download, BarChart2,
-  Activity, TrendingUp, Globe, Layers
+  ChevronDown, ChevronRight, RefreshCw,
+  BarChart2, Activity, TrendingUp, Globe, Layers,
 } from "lucide-react";
-import {
-  createChart, LineSeries, HistogramSeries, AreaSeries,
-  LineStyle, ColorType,
-} from "lightweight-charts";
 
-// ─── Color Palette ────────────────────────────────────────────────────────────
-const C = {
-  bg: "#060b14",
-  grid: "#0d1f35",
-  text: "#94a3b8",
-  textDim: "#4a5568",
-  green: "#22c55e",
-  red: "#ef4444",
-  amber: "#eab308",
-  blue: "#38bdf8",
-  purple: "#a78bfa",
-  orange: "#f97316",
-  border: "#132035",
-  panelBg: "#08111e",
-  accent: "#00d4a0",
-  priceLine: "#d1d5db",   // thin light line for top price pane
-};
+// ─── API Base ─────────────────────────────────────────────────────────────────
+const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
-// ─── Base chart options ───────────────────────────────────────────────────────
-function makeChartOpts(height: number) {
-  return {
-    layout: {
-      background: { type: ColorType.Solid, color: C.panelBg },
-      textColor: C.text,
-      fontFamily: "'IBM Plex Mono', monospace",
-      fontSize: 10,
-    },
-    grid: {
-      vertLines: { color: C.grid, style: LineStyle.Dotted },
-      horzLines: { color: C.grid, style: LineStyle.Dotted },
-    },
-    crosshair: { vertLine: { color: "#38bdf850" }, horzLine: { color: "#38bdf850" } },
-    rightPriceScale: { borderColor: C.border, textColor: C.text },
-    leftPriceScale: { visible: false, borderColor: C.border },
-    timeScale: { borderColor: C.border, timeVisible: true, secondsVisible: false },
-    handleScroll: true,
-    handleScale: true,
-    width: 0, // set dynamically
-    height,
-  };
-}
+// ─── Colors ───────────────────────────────────────────────────────────────────
+const BG       = "#060b14";
+const PAPER    = "#060b14";
+const GRID     = "#0d1f35";
+const AXIS_CLR = "#64748b";
+const GREEN    = "#22c55e";
+const RED      = "#ef4444";
+const AMBER    = "#eab308";
+const BLUE     = "#38bdf8";
+const PURPLE   = "#a78bfa";
+const ACCENT   = "#00d4a0";
+const PRICE_CLR = "#cbd5e1";  // thin light price line
+const REFLINE  = "#334155";   // dashed reference lines
+const FONT     = "'IBM Plex Mono', monospace";
 
-// ─── Timeframe filter ─────────────────────────────────────────────────────────
+// ─── Timeframe ────────────────────────────────────────────────────────────────
 type TF = "1Y" | "2Y" | "5Y" | "10Y";
 const TF_DAYS: Record<TF, number> = { "1Y": 365, "2Y": 730, "5Y": 1825, "10Y": 3650 };
 
-function filterByTF(data: any[], tf: TF): any[] {
-  if (!data?.length) return [];
-  const cutoff = Date.now() - TF_DAYS[tf] * 86400 * 1000;
-  return data.filter((d: any) => {
-    const dateStr = d.date ?? d.time;
-    if (!dateStr) return false;
-    return new Date(dateStr).getTime() >= cutoff;
-  });
+function cutoffDate(tf: TF): string {
+  const d = new Date(Date.now() - TF_DAYS[tf] * 86400 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
+function filterDates<T extends { date: string }>(arr: T[], tf: TF): T[] {
+  const cut = cutoffDate(tf);
+  return arr.filter(d => d.date >= cut);
+}
+
+// ─── Plotly base layout ───────────────────────────────────────────────────────
+function baseLayout(title?: string): Partial<Plotly.Layout> {
+  return {
+    paper_bgcolor: PAPER,
+    plot_bgcolor: BG,
+    font: { family: FONT, size: 10, color: AXIS_CLR },
+    margin: { l: 52, r: 60, t: title ? 32 : 8, b: 40 },
+    showlegend: true,
+    legend: {
+      x: 0.01, y: 0.99, xanchor: "left", yanchor: "top",
+      bgcolor: "rgba(6,11,20,0.7)", bordercolor: GRID, borderwidth: 1,
+      font: { family: FONT, size: 9, color: AXIS_CLR },
+      orientation: "h",
+    },
+    hovermode: "x unified",
+    hoverlabel: { bgcolor: "#0d1f35", bordercolor: GRID, font: { family: FONT, size: 10 } },
+    dragmode: "pan",
+    ...(title ? { title: { text: title, font: { family: FONT, size: 11, color: AXIS_CLR }, x: 0.01 } } : {}),
+  } as any;
+}
+
+function axisStyle(opts: Partial<Plotly.Axis> = {}): Partial<Plotly.Axis> {
+  return {
+    gridcolor: GRID,
+    gridwidth: 1,
+    linecolor: GRID,
+    zerolinecolor: REFLINE,
+    zerolinewidth: 1,
+    tickfont: { family: FONT, size: 9, color: AXIS_CLR },
+    color: AXIS_CLR,
+    showgrid: true,
+    ...opts,
+  } as any;
+}
+
+const PLOTLY_CONFIG: Partial<Plotly.Config> = {
+  responsive: true,
+  displayModeBar: true,
+  displaylogo: false,
+  modeBarButtonsToRemove: ["select2d", "lasso2d", "resetScale2d", "toImage"] as any,
+  modeBarButtonsToAdd: [],
+  scrollZoom: true,
+};
+
+// ─── Reference line shape helper ─────────────────────────────────────────────
+function hline(y: number, yref: string, label: string, color: string = REFLINE): Partial<Plotly.Shape> {
+  return {
+    type: "line",
+    xref: "paper", x0: 0, x1: 1,
+    yref: yref as any, y0: y, y1: y,
+    line: { color, width: 1, dash: "dash" },
+  } as any;
 }
 
 // ─── Chart Definitions ────────────────────────────────────────────────────────
@@ -72,689 +104,513 @@ interface ChartDef {
   desc: string;
   category: string;
   endpoint: string;
-  /** Does the chart use split-panel (price top / indicator bottom)? */
-  splitPanel?: boolean;
-  /** Ticker for the price pane in split-panel mode */
-  priceTicker?: string;
-  renderType: "line" | "histogram" | "multi-line" | "area" | "scatter" | "split-histogram" | "split-line" | "split-area" | "spy-volume" | "sentiment";
+  priceTicker?: string;        // undefined = no price pane
   tickers?: string[];
   defaultTicker?: string;
-  notes?: string;
 }
 
 const CHARTS: ChartDef[] = [
-  // ── BREADTH ─────────────────────────────────────────────────────────────────
-  {
-    id: "1A", label: "% Above MA", desc: "% of S&P sectors above 20/50/200-day MAs",
-    category: "breadth", endpoint: "/api/charts/breadth/pct_above_ma",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "1B", label: "McClellan Osc", desc: "Breadth momentum oscillator (19/39 EMA of A-D spread)",
-    category: "breadth", endpoint: "/api/charts/breadth/mcclellan",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-histogram",
-  },
-  {
-    id: "1C", label: "RSI Breadth", desc: "Median RSI across S&P sectors",
-    category: "breadth", endpoint: "/api/charts/breadth/rsi_breadth",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "1D", label: "MACD Breadth", desc: "% of sectors with MACD above signal line",
-    category: "breadth", endpoint: "/api/charts/breadth/macd_breadth",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "1E", label: "Zweig Thrust", desc: "Zweig Breadth Thrust oscillator (10-day EMA A-D ratio)",
-    category: "breadth", endpoint: "/api/charts/breadth/zweig",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "1F", label: "A-D Line", desc: "Advance-Decline cumulative line",
-    category: "breadth", endpoint: "/api/charts/breadth/ad_line",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-area",
-  },
+  // BREADTH
+  { id: "1A", label: "% Above MA", desc: "% of S&P sectors above 20/50/200-day MAs", category: "breadth", endpoint: "/api/charts/breadth/pct_above_ma", priceTicker: "SPY" },
+  { id: "1B", label: "McClellan Osc", desc: "Breadth momentum oscillator (19/39 EMA of A-D spread)", category: "breadth", endpoint: "/api/charts/breadth/mcclellan", priceTicker: "SPY" },
+  { id: "1C", label: "RSI Breadth", desc: "Median RSI across S&P sectors", category: "breadth", endpoint: "/api/charts/breadth/rsi_breadth", priceTicker: "SPY" },
+  { id: "1D", label: "MACD Breadth", desc: "% of sectors with MACD above signal line", category: "breadth", endpoint: "/api/charts/breadth/macd_breadth", priceTicker: "SPY" },
+  { id: "1E", label: "Zweig Thrust", desc: "Zweig Breadth Thrust oscillator (10-day EMA A-D ratio)", category: "breadth", endpoint: "/api/charts/breadth/zweig", priceTicker: "SPY" },
+  { id: "1F", label: "A-D Line", desc: "Advance-Decline cumulative line", category: "breadth", endpoint: "/api/charts/breadth/ad_line", priceTicker: "SPY" },
 
-  // ── SENTIMENT / POSITIONING ─────────────────────────────────────────────────
-  {
-    id: "2A", label: "ES Positioning", desc: "E-Mini S&P 500 COT: Large Spec / Asset Mgr / Dealer net",
-    category: "sentiment", endpoint: "/api/charts/cot/ES",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "2B", label: "NQ Positioning", desc: "E-Mini Nasdaq COT: Large Spec / Asset Mgr / Dealer net",
-    category: "sentiment", endpoint: "/api/charts/cot/NQ",
-    splitPanel: true, priceTicker: "QQQ", renderType: "split-line",
-  },
-  {
-    id: "2C", label: "RTY Positioning", desc: "E-Mini Russell 2000 COT",
-    category: "sentiment", endpoint: "/api/charts/cot/RTY",
-    splitPanel: true, priceTicker: "IWM", renderType: "split-line",
-  },
-  {
-    id: "2D", label: "VIX Futures Pos.", desc: "VIX Futures COT: Large Spec Net (sentiment gauge)",
-    category: "sentiment", endpoint: "/api/charts/cot/VI",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "2E", label: "CTA Model", desc: "Estimated CTA trend-following exposure (SPY-based)",
-    category: "sentiment", endpoint: "/api/charts/cta",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-area",
-  },
-  {
-    id: "2F", label: "Put/Call Proxy", desc: "DSI proxy: short-term RSI smoothed as P/C surrogate",
-    category: "sentiment", endpoint: "/api/charts/dsi/SPY",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "2G", label: "Speculative Vol", desc: "VIX vs 20d SMA — speculative options activity proxy",
-    category: "sentiment", endpoint: "/api/charts/spec-vol",
-    splitPanel: true, priceTicker: "SPY", renderType: "sentiment",
-  },
-  {
-    id: "2H", label: "Sentiment Composite", desc: "VIX percentile + credit spreads → market fear/greed score",
-    category: "sentiment", endpoint: "/api/charts/sentiment",
-    splitPanel: true, priceTicker: "SPY", renderType: "sentiment",
-  },
+  // SENTIMENT / POSITIONING
+  { id: "2A", label: "ES Positioning", desc: "E-Mini S&P 500 COT: Large Spec / Asset Mgr / Dealer net", category: "sentiment", endpoint: "/api/charts/cot/ES", priceTicker: "SPY" },
+  { id: "2B", label: "NQ Positioning", desc: "E-Mini Nasdaq COT: Large Spec / Asset Mgr / Dealer net", category: "sentiment", endpoint: "/api/charts/cot/NQ", priceTicker: "QQQ" },
+  { id: "2C", label: "RTY Positioning", desc: "E-Mini Russell 2000 COT", category: "sentiment", endpoint: "/api/charts/cot/RTY", priceTicker: "IWM" },
+  { id: "2D", label: "VIX Futures Pos.", desc: "VIX Futures COT: Large Spec Net", category: "sentiment", endpoint: "/api/charts/cot/VI", priceTicker: "SPY" },
+  { id: "2E", label: "CTA Model", desc: "Estimated CTA trend-following exposure (SPY-based)", category: "sentiment", endpoint: "/api/charts/cta", priceTicker: "SPY" },
+  { id: "2F", label: "Put/Call Proxy", desc: "DSI proxy: short-term RSI smoothed as P/C surrogate", category: "sentiment", endpoint: "/api/charts/dsi/SPY", priceTicker: "SPY" },
+  { id: "2G", label: "Speculative Vol", desc: "VIX vs 20d SMA — speculative options activity proxy", category: "sentiment", endpoint: "/api/charts/spec-vol", priceTicker: "SPY" },
+  { id: "2H", label: "Sentiment Composite", desc: "VIX percentile + credit spreads → fear/greed score 0-100", category: "sentiment", endpoint: "/api/charts/sentiment", priceTicker: "SPY" },
 
-  // ── MACRO / LIQUIDITY ───────────────────────────────────────────────────────
-  {
-    id: "3A", label: "Liquidity Composite", desc: "6-series FRED liquidity composite (M2, repo, Fed BS, credit...)",
-    category: "macro", endpoint: "/api/charts/liquidity",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "3B", label: "Yield Curve", desc: "10Y-2Y and 10Y-3M spreads (FRED)",
-    category: "macro", endpoint: "/api/charts/yield-curve",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "3C", label: "Credit Spreads", desc: "HY OAS and BBB OAS (FRED — ICE BofA)",
-    category: "macro", endpoint: "/api/charts/credit-spreads",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "3D", label: "Fed Balance Sheet", desc: "Fed total assets ($B) vs SPY price",
-    category: "macro", endpoint: "/api/charts/fed-balance-sheet",
-    renderType: "multi-line",
-  },
-  {
-    id: "3E", label: "Sector Rotation", desc: "Momentum vs relative strength scatter — 11 SPDR ETFs",
-    category: "macro", endpoint: "/api/charts/sector-rotation",
-    renderType: "scatter",
-  },
-  {
-    id: "3F", label: "XLE/SPY Ratio", desc: "Energy vs broad market ratio",
-    category: "macro", endpoint: "/api/charts/ratio/XLE/SPY",
-    splitPanel: true, priceTicker: "SPY", renderType: "split-area",
-  },
+  // MACRO / LIQUIDITY
+  { id: "3A", label: "Liquidity Composite", desc: "6-series FRED liquidity composite (M2, repo, Fed BS, credit)", category: "macro", endpoint: "/api/charts/liquidity", priceTicker: "SPY" },
+  { id: "3B", label: "Yield Curve", desc: "10Y-2Y and 10Y-3M spreads (FRED)", category: "macro", endpoint: "/api/charts/yield-curve", priceTicker: "SPY" },
+  { id: "3C", label: "Credit Spreads", desc: "HY OAS and BBB OAS (FRED — ICE BofA)", category: "macro", endpoint: "/api/charts/credit-spreads", priceTicker: "SPY" },
+  { id: "3D", label: "Fed Balance Sheet", desc: "Fed total assets ($B) vs SPY price", category: "macro", endpoint: "/api/charts/fed-balance-sheet" },
+  { id: "3E", label: "Sector Rotation", desc: "Momentum vs relative strength scatter — 11 SPDR ETFs", category: "macro", endpoint: "/api/charts/sector-rotation" },
+  { id: "3F", label: "XLE/SPY Ratio", desc: "Energy vs broad market ratio", category: "macro", endpoint: "/api/charts/ratio/XLE/SPY", priceTicker: "SPY" },
 
-  // ── TECHNICAL ───────────────────────────────────────────────────────────────
-  {
-    id: "4A", label: "Trend Power Osc", desc: "SMA slope × RSI z-score composite",
-    category: "technical",
-    tickers: ["SPY", "QQQ", "IWM", "DIA", "GLD", "TLT", "XLE", "XLF"], defaultTicker: "SPY",
-    endpoint: "/api/charts/tpo/SPY", splitPanel: true, priceTicker: "SPY", renderType: "split-histogram",
-  },
-  {
-    id: "4B", label: "Daily Sentiment", desc: "DSI proxy: 5-day RSI smoothed 3-day EMA",
-    category: "technical",
-    tickers: ["SPY", "QQQ", "IWM", "GLD", "TLT", "BTC-USD"], defaultTicker: "SPY",
-    endpoint: "/api/charts/dsi/SPY", splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "4C", label: "SPY Volume", desc: "SPY price (top) + daily volume histogram with 20d avg line",
-    category: "technical", endpoint: "/api/charts/spy-volume",
-    renderType: "spy-volume",
-  },
-  {
-    id: "4D", label: "ATR Extension", desc: "Price % extended beyond N-ATR bands from SMA20",
-    category: "technical",
-    tickers: ["SPY", "QQQ", "IWM", "AAPL", "TSLA", "NVDA", "GLD", "TLT"], defaultTicker: "SPY",
-    endpoint: "/api/charts/atr-ext/SPY", splitPanel: true, priceTicker: "SPY", renderType: "split-line",
-  },
-  {
-    id: "4E", label: "Rel Strength", desc: "Ticker vs SPY relative strength ratio",
-    category: "technical",
-    tickers: ["QQQ", "IWM", "XLE", "XLF", "XLK", "GLD", "TLT", "AAPL", "NVDA"], defaultTicker: "QQQ",
-    endpoint: "/api/charts/ratio/QQQ/SPY", splitPanel: true, priceTicker: "SPY", renderType: "split-area",
-  },
+  // TECHNICAL
+  { id: "4A", label: "Trend Power Osc", desc: "SMA slope × RSI z-score composite", category: "technical", tickers: ["SPY","QQQ","IWM","DIA","GLD","TLT","XLE","XLF"], defaultTicker: "SPY", endpoint: "/api/charts/tpo/SPY", priceTicker: "SPY" },
+  { id: "4B", label: "Daily Sentiment", desc: "DSI proxy: 5-day RSI smoothed 3-day EMA", category: "technical", tickers: ["SPY","QQQ","IWM","GLD","TLT","BTC-USD"], defaultTicker: "SPY", endpoint: "/api/charts/dsi/SPY", priceTicker: "SPY" },
+  { id: "4C", label: "SPY Volume", desc: "SPY price (top) + daily volume histogram with 20d avg", category: "technical", endpoint: "/api/charts/spy-volume" },
+  { id: "4D", label: "ATR Extension", desc: "Price % extended beyond N-ATR bands from SMA20", category: "technical", tickers: ["SPY","QQQ","IWM","AAPL","TSLA","NVDA","GLD","TLT"], defaultTicker: "SPY", endpoint: "/api/charts/atr-ext/SPY", priceTicker: "SPY" },
+  { id: "4E", label: "Rel Strength", desc: "Ticker vs SPY relative strength ratio", category: "technical", tickers: ["QQQ","IWM","XLE","XLF","XLK","GLD","TLT","AAPL","NVDA"], defaultTicker: "QQQ", endpoint: "/api/charts/ratio/QQQ/SPY", priceTicker: "SPY" },
 ];
 
 const CATEGORIES = [
-  { id: "breadth", label: "Breadth", icon: BarChart2, color: C.green },
-  { id: "sentiment", label: "Sentiment & Positioning", icon: Activity, color: C.amber },
-  { id: "macro", label: "Macro & Liquidity", icon: Globe, color: C.blue },
-  { id: "technical", label: "Technical / Price Action", icon: TrendingUp, color: C.purple },
+  { id: "breadth",   label: "Breadth",                  icon: BarChart2, color: GREEN  },
+  { id: "sentiment", label: "Sentiment & Positioning",  icon: Activity,  color: AMBER  },
+  { id: "macro",     label: "Macro & Liquidity",        icon: Globe,     color: BLUE   },
+  { id: "technical", label: "Technical / Price Action", icon: TrendingUp,color: PURPLE },
 ];
 
-// ─── Helper: add a horizontal price line to a series ─────────────────────────
-function addHLine(series: any, value: number, color: string, title: string) {
-  try {
-    series.createPriceLine({
-      price: value,
-      color: `${color}99`,
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      axisLabelVisible: true,
-      title,
+// ─── Build Plotly figure from data + chart def ────────────────────────────────
+function buildFigure(
+  def: ChartDef,
+  indData: any,
+  priceData: any[] | null,
+  tf: TF,
+  activeTicker: string,
+): { data: Plotly.Data[]; layout: Partial<Plotly.Layout> } | null {
+
+  if (!indData) return null;
+
+  const hasPricePane = !!def.priceTicker && !!priceData?.length;
+
+  // ── Sector Rotation scatter (special case — no price pane) ────────────────
+  if (def.id === "3E") {
+    if (!Array.isArray(indData) || !indData.length) return null;
+    const colors = indData.map((d: any) => {
+      if (d.rs > 0 && d.momentum > 0) return GREEN;
+      if (d.rs > 0 && d.momentum <= 0) return AMBER;
+      if (d.rs <= 0 && d.momentum > 0) return BLUE;
+      return RED;
     });
-  } catch { /* ignore */ }
-}
+    return {
+      data: [{
+        type: "scatter",
+        mode: "markers+text",
+        x: indData.map((d: any) => d.rs),
+        y: indData.map((d: any) => d.momentum),
+        text: indData.map((d: any) => d.symbol),
+        textposition: "middle center",
+        textfont: { family: FONT, size: 10, color: colors },
+        marker: { color: colors, size: 28, opacity: 0.15, line: { color: colors, width: 1.5 } },
+        hovertemplate: "<b>%{text}</b><br>RS: %{x:.2f}<br>Mom: %{y:.2f}<extra></extra>",
+      } as any],
+      layout: {
+        ...baseLayout("Sector Rotation — RS vs Momentum"),
+        xaxis: { ...axisStyle(), title: { text: "Relative Strength →", font: { family: FONT, size: 10, color: AXIS_CLR } }, zeroline: true, zerolinecolor: REFLINE, zerolinewidth: 1 },
+        yaxis: { ...axisStyle(), title: { text: "Momentum →", font: { family: FONT, size: 10, color: AXIS_CLR } }, zeroline: true },
+        annotations: [
+          { x: 0.95, y: 0.95, xref: "paper", yref: "paper", text: "LEADING", showarrow: false, font: { color: GREEN, size: 9, family: FONT } },
+          { x: 0.05, y: 0.95, xref: "paper", yref: "paper", text: "IMPROVING", showarrow: false, font: { color: BLUE, size: 9, family: FONT } },
+          { x: 0.95, y: 0.05, xref: "paper", yref: "paper", text: "WEAKENING", showarrow: false, font: { color: AMBER, size: 9, family: FONT } },
+          { x: 0.05, y: 0.05, xref: "paper", yref: "paper", text: "LAGGING", showarrow: false, font: { color: RED, size: 9, family: FONT } },
+        ],
+      } as any,
+    };
+  }
 
-// ─── Helper: toLineData ───────────────────────────────────────────────────────
-function toLineData(arr: any[], dateKey = "date", valueKey = "value") {
-  return arr
-    .filter((d: any) => d[dateKey] && d[valueKey] != null && !isNaN(Number(d[valueKey])))
-    .map((d: any) => ({ time: d[dateKey] as any, value: Number(d[valueKey]) }));
-}
+  // ── SPY Volume (special: price on top, histogram on bottom) ──────────────
+  if (def.id === "4C") {
+    if (!Array.isArray(indData) || !indData.length) return null;
+    const d = filterDates(indData, tf);
+    const dates = d.map((r: any) => r.date);
+    const closes = d.map((r: any) => r.close);
+    const vols = d.map((r: any) => r.volume);
+    const avg20 = d.map((r: any) => r.avgVol20);
+    const volColors = d.map((r: any, i: number) =>
+      (r.avgVol20 != null && r.volume > r.avgVol20) ? RED + "cc" : BLUE + "55"
+    );
 
-// ─── Sector Rotation Scatter (SVG) ───────────────────────────────────────────
-function SectorRotationChart({ data }: { data: any }) {
-  if (!data?.length) return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: C.textDim, fontFamily: "IBM Plex Mono", fontSize: 11 }}>
-      NO DATA
-    </div>
-  );
+    return {
+      data: [
+        {
+          type: "scatter", mode: "lines",
+          x: dates, y: closes, yaxis: "y1", name: "SPY",
+          line: { color: PRICE_CLR, width: 1 },
+          hovertemplate: "SPY: %{y:.2f}<extra></extra>",
+        },
+        {
+          type: "bar",
+          x: dates, y: vols, yaxis: "y2", name: "Volume",
+          marker: { color: volColors },
+          hovertemplate: "Vol: %{y:,.0f}<extra></extra>",
+        },
+        {
+          type: "scatter", mode: "lines",
+          x: dates, y: avg20, yaxis: "y2", name: "20d Avg",
+          line: { color: AMBER, width: 1.5, dash: "dot" },
+          hovertemplate: "20d Avg: %{y:,.0f}<extra></extra>",
+        },
+      ] as any,
+      layout: {
+        ...baseLayout(),
+        grid: { rows: 2, columns: 1, pattern: "coupled", roworder: "top to bottom" },
+        yaxis:  { ...axisStyle(), domain: [0.38, 1.0], title: { text: "SPY", font: { size: 9, color: AXIS_CLR, family: FONT } } },
+        yaxis2: { ...axisStyle(), domain: [0, 0.34] },
+        xaxis:  { ...axisStyle(), anchor: "y2", matches: "x" },
+        shapes: [
+          { type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: 0.36, y1: 0.36, line: { color: GRID, width: 1 } } as any,
+        ],
+        margin: { l: 52, r: 60, t: 8, b: 40 },
+      } as any,
+    };
+  }
 
-  const w = 600, h = 440, pad = 50;
-  const rs: number[] = data.map((d: any) => d.rs ?? 0);
-  const mom: number[] = data.map((d: any) => d.momentum ?? 0);
-  const minX = Math.min(...rs), maxX = Math.max(...rs);
-  const minY = Math.min(...mom), maxY = Math.max(...mom);
+  // ── Fed Balance Sheet (no price pane, overlay on same chart) ────────────
+  if (def.id === "3D") {
+    if (!Array.isArray(indData) || !indData.length) return null;
+    const d = filterDates(indData, tf);
+    return {
+      data: [
+        {
+          type: "scatter", mode: "lines",
+          x: d.map((r: any) => r.date),
+          y: d.map((r: any) => r.fedBS),
+          name: "Fed Assets ($B)",
+          fill: "tozeroy",
+          fillcolor: BLUE + "22",
+          line: { color: BLUE, width: 2 },
+          yaxis: "y1",
+          hovertemplate: "Fed BS: $%{y:.0f}B<extra></extra>",
+        },
+        {
+          type: "scatter", mode: "lines",
+          x: d.map((r: any) => r.date),
+          y: d.map((r: any) => r.spyClose),
+          name: "SPY",
+          line: { color: GREEN, width: 1.5 },
+          yaxis: "y2",
+          hovertemplate: "SPY: %{y:.2f}<extra></extra>",
+        },
+      ] as any,
+      layout: {
+        ...baseLayout(),
+        yaxis:  { ...axisStyle(), title: { text: "Fed Assets ($B)", font: { size: 9, color: BLUE, family: FONT } }, side: "left" },
+        yaxis2: { ...axisStyle(), title: { text: "SPY", font: { size: 9, color: GREEN, family: FONT } }, side: "right", overlaying: "y" },
+        xaxis:  { ...axisStyle() },
+      } as any,
+    };
+  }
 
-  const xScale = (v: number) => pad + ((v - minX) / (maxX - minX + 0.001)) * (w - pad * 2);
-  const yScale = (v: number) => h - pad - ((v - minY) / (maxY - minY + 0.001)) * (h - pad * 2);
+  // ── Standard dual-pane charts ────────────────────────────────────────────
+  // Build price trace (top pane, y1)
+  const priceDates: string[] = [];
+  const priceClose: number[] = [];
+  if (hasPricePane && priceData) {
+    const pFiltered = filterDates(priceData, tf);
+    pFiltered.forEach((b: any) => { if (b.close != null) { priceDates.push(b.date); priceClose.push(b.close); } });
+  }
 
-  const midX = xScale((minX + maxX) / 2);
-  const midY = yScale((minY + maxY) / 2);
+  const traces: Plotly.Data[] = [];
+  const shapes: Partial<Plotly.Shape>[] = [
+    // Divider between top/bottom pane
+    { type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: 0.36, y1: 0.36, line: { color: GRID, width: 1 } } as any,
+  ];
 
-  const quadrantColor = (cx: number, cy: number) => {
-    if (cx > midX && cy < midY) return C.green;
-    if (cx > midX && cy > midY) return C.amber;
-    if (cx < midX && cy > midY) return C.red;
-    return C.blue;
+  if (hasPricePane) {
+    traces.push({
+      type: "scatter", mode: "lines",
+      x: priceDates, y: priceClose,
+      name: activeTicker,
+      yaxis: "y1",
+      line: { color: PRICE_CLR, width: 1 },
+      hovertemplate: `${activeTicker}: %{y:.2f}<extra></extra>`,
+    } as any);
+  }
+
+  // ── Build indicator traces (bottom pane, y2) ──────────────────────────────
+  const iref = "y2";
+
+  const addLine = (x: string[], y: (number|null)[], name: string, color: string, width = 2.5, dash?: string) => {
+    traces.push({
+      type: "scatter", mode: "lines",
+      x, y, name, yaxis: iref,
+      line: { color, width, ...(dash ? { dash } : {}) },
+      hovertemplate: `${name}: %{y:.3f}<extra></extra>`,
+    } as any);
   };
 
-  return (
-    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <svg width="100%" viewBox={`0 0 ${w} ${h}`} style={{ background: C.panelBg, maxHeight: 440 }}>
-        <line x1={midX} y1={pad} x2={midX} y2={h - pad} stroke={C.grid} strokeWidth="1" strokeDasharray="4,4" />
-        <line x1={pad} y1={midY} x2={w - pad} y2={midY} stroke={C.grid} strokeWidth="1" strokeDasharray="4,4" />
-        <text x={w - pad - 4} y={pad + 14} fill={C.green} fontSize="10" textAnchor="end" fontFamily="IBM Plex Mono">LEADING</text>
-        <text x={w - pad - 4} y={h - pad - 6} fill={C.amber} fontSize="10" textAnchor="end" fontFamily="IBM Plex Mono">WEAKENING</text>
-        <text x={pad + 4} y={h - pad - 6} fill={C.red} fontSize="10" fontFamily="IBM Plex Mono">LAGGING</text>
-        <text x={pad + 4} y={pad + 14} fill={C.blue} fontSize="10" fontFamily="IBM Plex Mono">IMPROVING</text>
-        <text x={w / 2} y={h - 8} fill={C.text} fontSize="10" textAnchor="middle" fontFamily="IBM Plex Mono">Relative Strength →</text>
-        <text x={12} y={h / 2} fill={C.text} fontSize="10" textAnchor="middle" fontFamily="IBM Plex Mono" transform={`rotate(-90,12,${h / 2})`}>Momentum →</text>
-        {data.map((d: any, i: number) => {
-          const cx = xScale(d.rs ?? 0);
-          const cy = yScale(d.momentum ?? 0);
-          const clr = quadrantColor(cx, cy);
-          return (
-            <g key={i}>
-              <circle cx={cx} cy={cy} r={18} fill={`${clr}22`} stroke={clr} strokeWidth="1.5" />
-              <text x={cx} y={cy + 4} fill={clr} fontSize="9" textAnchor="middle" fontFamily="IBM Plex Mono" fontWeight="600">{d.symbol}</text>
-            </g>
-          );
-        })}
-      </svg>
-    </div>
-  );
-}
+  const addBar = (x: string[], y: (number|null)[], name: string, colors: string[]) => {
+    traces.push({
+      type: "bar",
+      x, y, name, yaxis: iref,
+      marker: { color: colors },
+      hovertemplate: `${name}: %{y:.3f}<extra></extra>`,
+    } as any);
+  };
 
-// ─── Split Panel Chart (macrocharts.com style) ───────────────────────────────
-// Top pane: SPY/index price line (thin, light)
-// Bottom pane: indicator (bold colored line or histogram + gray daily bars behind)
-interface SplitPanelProps {
-  containerRef: React.RefObject<HTMLDivElement>;
-  priceData: any[] | null;
-  indicatorData: any;
-  def: ChartDef;
-  tf: TF;
-  activeTicker: string;
-}
-
-function useSplitPanelChart({
-  containerRef, priceData, indicatorData, def, tf, activeTicker,
-}: SplitPanelProps) {
-  useEffect(() => {
-    if (!containerRef.current || !indicatorData) return;
-    const container = containerRef.current;
-    container.innerHTML = "";
-
-    const totalH = container.clientHeight || 520;
-    const topH = Math.round(totalH * 0.35);
-    const botH = totalH - topH;
-
-    // ── Top pane: price
-    const topEl = document.createElement("div");
-    topEl.style.cssText = `width:100%;height:${topH}px;`;
-    container.appendChild(topEl);
-
-    const topChart = createChart(topEl, {
-      ...makeChartOpts(topH),
-      width: container.clientWidth,
-      rightPriceScale: { borderColor: C.border, textColor: C.text },
-      timeScale: { borderColor: C.border, visible: false },
-    });
-
-    if (priceData?.length) {
-      const filtered = filterByTF(priceData, tf);
-      const priceSeries = topChart.addSeries(LineSeries, {
-        color: C.priceLine,
-        lineWidth: 1,
-        title: activeTicker,
-        priceLineVisible: false,
-        lastValueVisible: true,
-      });
-      priceSeries.setData(
-        filtered
-          .filter((b: any) => b.date && b.close != null)
-          .map((b: any) => ({ time: b.date as any, value: b.close }))
-      );
-    }
-
-    // Divider
-    const divider = document.createElement("div");
-    divider.style.cssText = `width:100%;height:1px;background:${C.border};`;
-    container.appendChild(divider);
-
-    // ── Bottom pane: indicator
-    const botEl = document.createElement("div");
-    botEl.style.cssText = `width:100%;height:${botH - 1}px;`;
-    container.appendChild(botEl);
-
-    const botChart = createChart(botEl, {
-      ...makeChartOpts(botH - 1),
-      width: container.clientWidth,
-      timeScale: { borderColor: C.border, timeVisible: true, secondsVisible: false },
-    });
-
-    const filtered = Array.isArray(indicatorData) ? filterByTF(indicatorData, tf) : indicatorData;
-
-    try {
-      renderIndicatorPane(botChart, def, filtered, tf);
-    } catch (e) {
-      console.warn("Indicator pane error:", def.id, e);
-    }
-
-    // Sync time scales
-    topChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (range) botChart.timeScale().setVisibleLogicalRange(range);
-    });
-    botChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (range) topChart.timeScale().setVisibleLogicalRange(range);
-    });
-
-    // Fit both
-    topChart.timeScale().fitContent();
-    botChart.timeScale().fitContent();
-
-    const ro = new ResizeObserver(() => {
-      const w = container.clientWidth;
-      topChart.applyOptions({ width: w });
-      botChart.applyOptions({ width: w });
-    });
-    ro.observe(container);
-
-    return () => {
-      ro.disconnect();
-      topChart.remove();
-      botChart.remove();
-    };
-  }, [priceData, indicatorData, tf, activeTicker]); // eslint-disable-line
-}
-
-// ─── Indicator pane renderer ─────────────────────────────────────────────────
-function renderIndicatorPane(chart: any, def: ChartDef, data: any, tf: TF) {
-  if (!data) return;
+  const raw = Array.isArray(indData) ? filterDates(indData, tf) : [];
 
   switch (def.id) {
     // ── BREADTH ──────────────────────────────────────────────────────────────
     case "1A": {
-      // pct_above_ma: { date, pct20, pct50, pct200 }[]
-      const raw = Array.isArray(data) ? data : [];
-      const s20 = chart.addSeries(LineSeries, { color: C.green, lineWidth: 2, title: "% >20d" });
-      const s50 = chart.addSeries(LineSeries, { color: C.amber, lineWidth: 2, title: "% >50d" });
-      const s200 = chart.addSeries(LineSeries, { color: C.red, lineWidth: 2, title: "% >200d" });
-      s20.setData(raw.filter((d: any) => d.pct20 != null).map((d: any) => ({ time: d.date, value: d.pct20 })));
-      s50.setData(raw.filter((d: any) => d.pct50 != null).map((d: any) => ({ time: d.date, value: d.pct50 })));
-      s200.setData(raw.filter((d: any) => d.pct200 != null).map((d: any) => ({ time: d.date, value: d.pct200 })));
-      addHLine(s20, 80, C.red, "OB 80");
-      addHLine(s20, 20, C.green, "OS 20");
-      addHLine(s20, 50, C.textDim, "50");
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.pct20  ?? null), "% >20d MA",  GREEN, 2);
+      addLine(x, raw.map((d: any) => d.pct50  ?? null), "% >50d MA",  AMBER, 2);
+      addLine(x, raw.map((d: any) => d.pct200 ?? null), "% >200d MA", RED,   2);
+      shapes.push(
+        hline(80, iref, "OB", RED + "99"),
+        hline(20, iref, "OS", GREEN + "99"),
+        hline(50, iref, "50", REFLINE),
+      );
       break;
     }
     case "1B": {
-      // mcclellan: { date, value }[]
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(HistogramSeries, { title: "McClellan" });
-      s.setData(raw.filter((d: any) => d.value != null).map((d: any) => ({
-        time: d.date, value: d.value,
-        color: d.value >= 0 ? `${C.green}cc` : `${C.red}cc`,
-      })));
-      addHLine(s, 0, C.textDim, "0");
+      const x = raw.map((d: any) => d.date);
+      const y = raw.map((d: any) => d.value ?? null);
+      const barColors = raw.map((d: any) => (d.value ?? 0) >= 0 ? GREEN + "cc" : RED + "cc");
+      addBar(x, y, "McClellan Osc", barColors);
+      shapes.push(hline(0, iref, "0", REFLINE));
       break;
     }
     case "1C": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(LineSeries, { color: C.blue, lineWidth: 2, title: "Median RSI" });
-      s.setData(toLineData(raw));
-      addHLine(s, 70, C.red, "OB 70");
-      addHLine(s, 30, C.green, "OS 30");
-      addHLine(s, 50, C.textDim, "50");
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.value ?? null), "Median RSI", BLUE);
+      shapes.push(
+        hline(70, iref, "OB 70", RED + "99"),
+        hline(30, iref, "OS 30", GREEN + "99"),
+        hline(50, iref, "Neutral", REFLINE),
+      );
       break;
     }
     case "1D": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(LineSeries, { color: C.amber, lineWidth: 2, title: "% MACD Bullish" });
-      s.setData(toLineData(raw));
-      addHLine(s, 50, C.textDim, "50%");
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.value ?? null), "% MACD Bullish", AMBER);
+      shapes.push(hline(50, iref, "50%", REFLINE));
       break;
     }
     case "1E": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(LineSeries, { color: C.accent, lineWidth: 2, title: "Zweig Thrust" });
-      s.setData(toLineData(raw));
-      addHLine(s, 0.615, C.green, "Thrust 0.615");
-      addHLine(s, 0.4, C.red, "Bear 0.4");
-      addHLine(s, 0.5, C.textDim, "0.5");
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.value ?? null), "Zweig Thrust", ACCENT, 2.5);
+      shapes.push(
+        hline(0.615, iref, "Thrust 0.615", GREEN + "99"),
+        hline(0.4,   iref, "Bear 0.4",     RED   + "99"),
+        hline(0.5,   iref, "Neutral",       REFLINE),
+      );
       break;
     }
     case "1F": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(AreaSeries, { lineColor: C.green, topColor: `${C.green}44`, bottomColor: `${C.green}00`, lineWidth: 2, title: "A-D Line" });
-      s.setData(toLineData(raw));
+      const x = raw.map((d: any) => d.date);
+      traces.push({
+        type: "scatter", mode: "lines",
+        x, y: raw.map((d: any) => d.value ?? null),
+        name: "A-D Line", yaxis: iref,
+        fill: "tozeroy", fillcolor: GREEN + "22",
+        line: { color: GREEN, width: 2 },
+        hovertemplate: "A-D: %{y:.0f}<extra></extra>",
+      } as any);
       break;
     }
 
     // ── COT POSITIONING ───────────────────────────────────────────────────────
     case "2A": case "2B": case "2C": case "2D": {
-      const raw = Array.isArray(data) ? data : [];
-      const sLarge = chart.addSeries(LineSeries, { color: C.green, lineWidth: 2, title: "Large Spec Net" });
-      const sAsset = chart.addSeries(LineSeries, { color: C.blue, lineWidth: 1, title: "Asset Mgr Net" });
-      const sDealer = chart.addSeries(LineSeries, { color: C.amber, lineWidth: 1, title: "Dealer Net" });
-      sLarge.setData(raw.filter((d: any) => d.largeSpecNet != null).map((d: any) => ({ time: d.date, value: d.largeSpecNet })));
-      sAsset.setData(raw.filter((d: any) => d.assetMgrNet != null).map((d: any) => ({ time: d.date, value: d.assetMgrNet })));
-      sDealer.setData(raw.filter((d: any) => d.dealerNet != null).map((d: any) => ({ time: d.date, value: d.dealerNet })));
-      addHLine(sLarge, 0, C.textDim, "0");
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.largeSpecNet ?? null), "Large Spec Net", GREEN, 2.5);
+      addLine(x, raw.map((d: any) => d.assetMgrNet  ?? null), "Asset Mgr Net",  BLUE, 1.5, "dot");
+      addLine(x, raw.map((d: any) => d.dealerNet    ?? null), "Dealer Net",      AMBER, 1.5, "dot");
+      shapes.push(hline(0, iref, "0", REFLINE));
       break;
     }
 
     // ── SENTIMENT ─────────────────────────────────────────────────────────────
     case "2E": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(AreaSeries, { lineColor: C.blue, topColor: `${C.blue}44`, bottomColor: `${C.blue}00`, lineWidth: 2, title: "CTA Exposure" });
-      s.setData(toLineData(raw));
-      addHLine(s, 0, C.textDim, "0");
-      addHLine(s, 50, C.red, "Max Long 50");
-      addHLine(s, -50, C.green, "Max Short -50");
+      const x = raw.map((d: any) => d.date);
+      traces.push({
+        type: "scatter", mode: "lines",
+        x, y: raw.map((d: any) => d.value ?? null),
+        name: "CTA Exposure", yaxis: iref,
+        fill: "tozeroy", fillcolor: BLUE + "22",
+        line: { color: BLUE, width: 2.5 },
+        hovertemplate: "CTA: %{y:.1f}<extra></extra>",
+      } as any);
+      shapes.push(
+        hline(0, iref, "0", REFLINE),
+        hline(50,  iref, "Max Long",  RED   + "99"),
+        hline(-50, iref, "Max Short", GREEN + "99"),
+      );
       break;
     }
     case "2F": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(LineSeries, { color: C.amber, lineWidth: 2, title: "P/C Proxy" });
-      s.setData(toLineData(raw));
-      addHLine(s, 80, C.red, "Extreme Bull 80");
-      addHLine(s, 20, C.green, "Extreme Bear 20");
-      addHLine(s, 50, C.textDim, "Neutral 50");
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.value ?? null), "P/C Proxy", AMBER);
+      shapes.push(
+        hline(80, iref, "Extreme Bull", RED   + "99"),
+        hline(20, iref, "Extreme Bear", GREEN + "99"),
+        hline(50, iref, "Neutral",       REFLINE),
+      );
       break;
     }
     case "2G": {
-      // VIX vs SMA20 — spec vol proxy
-      const raw = Array.isArray(data) ? data : [];
-      const sVix = chart.addSeries(LineSeries, { color: C.red, lineWidth: 2, title: "VIX" });
-      const sSMA = chart.addSeries(LineSeries, { color: `${C.textDim}`, lineWidth: 1, title: "VIX 20d SMA" });
-      sVix.setData(raw.filter((d: any) => d.value != null).map((d: any) => ({ time: d.date, value: d.value })));
-      sSMA.setData(raw.filter((d: any) => d.vixSMA20 != null).map((d: any) => ({ time: d.date, value: d.vixSMA20 })));
-      addHLine(sVix, 20, C.textDim, "20");
-      addHLine(sVix, 30, C.amber, "30");
-      addHLine(sVix, 40, C.red, "40");
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.value    ?? null), "VIX",      RED,  2.5);
+      addLine(x, raw.map((d: any) => d.vixSMA20 ?? null), "VIX 20d", AXIS_CLR, 1, "dot");
+      shapes.push(
+        hline(20, iref, "VIX 20", REFLINE),
+        hline(30, iref, "VIX 30", AMBER + "99"),
+        hline(40, iref, "VIX 40", RED   + "99"),
+      );
       break;
     }
     case "2H": {
-      // Sentiment composite: value 0-100
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(AreaSeries, { lineColor: C.accent, topColor: `${C.accent}44`, bottomColor: `${C.accent}00`, lineWidth: 2, title: "Sentiment" });
-      s.setData(raw.filter((d: any) => d.value != null).map((d: any) => ({ time: d.date, value: d.value })));
-      addHLine(s, 80, C.red, "Extreme Bull 80");
-      addHLine(s, 20, C.green, "Extreme Bear 20");
-      addHLine(s, 50, C.textDim, "Neutral 50");
+      const x = raw.map((d: any) => d.date);
+      traces.push({
+        type: "scatter", mode: "lines",
+        x, y: raw.map((d: any) => d.value ?? null),
+        name: "Sentiment Score", yaxis: iref,
+        fill: "tozeroy", fillcolor: ACCENT + "22",
+        line: { color: ACCENT, width: 2.5 },
+        hovertemplate: "Sentiment: %{y:.1f}<extra></extra>",
+      } as any);
+      shapes.push(
+        hline(80, iref, "Extreme Bull", RED   + "99"),
+        hline(20, iref, "Extreme Bear", GREEN + "99"),
+        hline(50, iref, "Neutral",       REFLINE),
+      );
       break;
     }
 
     // ── MACRO ─────────────────────────────────────────────────────────────────
     case "3A": {
-      const raw = Array.isArray(data) ? data : [];
-      const sComp = chart.addSeries(LineSeries, { color: C.accent, lineWidth: 2, title: "Composite" });
-      sComp.setData(raw.filter((d: any) => d.composite != null).map((d: any) => ({ time: d.date, value: d.composite })));
-      const sM2 = chart.addSeries(LineSeries, { color: C.blue, lineWidth: 1, title: "M2" });
-      sM2.setData(raw.filter((d: any) => d.m2 != null).map((d: any) => ({ time: d.date, value: d.m2 })));
-      const sRRP = chart.addSeries(LineSeries, { color: `${C.amber}99`, lineWidth: 1, title: "RRP" });
-      sRRP.setData(raw.filter((d: any) => d.rrp != null).map((d: any) => ({ time: d.date, value: d.rrp })));
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.composite ?? null), "Composite", ACCENT, 2.5);
+      addLine(x, raw.map((d: any) => d.m2        ?? null), "M2",        BLUE,  1, "dot");
+      addLine(x, raw.map((d: any) => d.rrp       ?? null), "RRP",       AMBER, 1, "dot");
       break;
     }
     case "3B": {
-      const raw = Array.isArray(data) ? data : [];
-      const s1 = chart.addSeries(LineSeries, { color: C.amber, lineWidth: 2, title: "10Y-2Y" });
-      const s2 = chart.addSeries(LineSeries, { color: C.blue, lineWidth: 2, title: "10Y-3M" });
-      s1.setData(raw.filter((d: any) => d.t10y2y != null).map((d: any) => ({ time: d.date, value: d.t10y2y })));
-      s2.setData(raw.filter((d: any) => d.t10y3m != null).map((d: any) => ({ time: d.date, value: d.t10y3m })));
-      addHLine(s1, 0, C.red, "Inversion 0");
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.t10y2y ?? null), "10Y-2Y", AMBER, 2.5);
+      addLine(x, raw.map((d: any) => d.t10y3m ?? null), "10Y-3M", BLUE,  2);
+      shapes.push(hline(0, iref, "Inversion", RED + "99"));
       break;
     }
     case "3C": {
-      const raw = Array.isArray(data) ? data : [];
-      const sHY = chart.addSeries(LineSeries, { color: C.red, lineWidth: 2, title: "HY OAS" });
-      const sBBB = chart.addSeries(LineSeries, { color: C.amber, lineWidth: 2, title: "BBB OAS" });
-      sHY.setData(raw.filter((d: any) => d.hyOAS != null).map((d: any) => ({ time: d.date, value: d.hyOAS })));
-      sBBB.setData(raw.filter((d: any) => d.bbbOAS != null).map((d: any) => ({ time: d.date, value: d.bbbOAS })));
+      const x = raw.map((d: any) => d.date);
+      addLine(x, raw.map((d: any) => d.hyOAS  ?? null), "HY OAS",  RED,  2.5);
+      addLine(x, raw.map((d: any) => d.bbbOAS ?? null), "BBB OAS", AMBER, 2);
       break;
     }
     case "3F": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(AreaSeries, { lineColor: C.amber, topColor: `${C.amber}33`, bottomColor: `${C.amber}00`, lineWidth: 2, title: "XLE/SPY" });
-      s.setData(toLineData(raw));
+      const x = raw.map((d: any) => d.date);
+      traces.push({
+        type: "scatter", mode: "lines",
+        x, y: raw.map((d: any) => d.value ?? null),
+        name: "XLE/SPY Ratio", yaxis: iref,
+        fill: "tozeroy", fillcolor: AMBER + "22",
+        line: { color: AMBER, width: 2 },
+        hovertemplate: "XLE/SPY: %{y:.4f}<extra></extra>",
+      } as any);
       break;
     }
 
     // ── TECHNICAL ─────────────────────────────────────────────────────────────
     case "4A": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(HistogramSeries, { title: "Trend Power Osc" });
-      s.setData(raw.filter((d: any) => d.value != null).map((d: any) => ({
-        time: d.date, value: d.value,
-        color: (d.value ?? 0) >= 0.5 ? `${C.green}cc` : (d.value ?? 0) <= -0.5 ? `${C.red}cc` : `${C.amber}cc`,
-      })));
-      addHLine(s, 0, C.textDim, "0");
+      const x = raw.map((d: any) => d.date);
+      const y = raw.map((d: any) => d.value ?? null);
+      const barColors = raw.map((d: any) => {
+        const v = d.value ?? 0;
+        return v >= 0.5 ? GREEN + "cc" : v <= -0.5 ? RED + "cc" : AMBER + "cc";
+      });
+      addBar(x, y, "Trend Power Osc", barColors);
+      shapes.push(hline(0, iref, "0", REFLINE));
       break;
     }
     case "4B": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(AreaSeries, { lineColor: C.blue, topColor: `${C.blue}44`, bottomColor: `${C.blue}00`, lineWidth: 2, title: "DSI Proxy" });
-      s.setData(toLineData(raw));
-      addHLine(s, 80, C.red, "Extreme Bull");
-      addHLine(s, 20, C.green, "Extreme Bear");
-      addHLine(s, 50, C.textDim, "Neutral");
+      const x = raw.map((d: any) => d.date);
+      traces.push({
+        type: "scatter", mode: "lines",
+        x, y: raw.map((d: any) => d.value ?? null),
+        name: "DSI Proxy", yaxis: iref,
+        fill: "tozeroy", fillcolor: BLUE + "22",
+        line: { color: BLUE, width: 2.5 },
+        hovertemplate: "DSI: %{y:.1f}<extra></extra>",
+      } as any);
+      shapes.push(
+        hline(80, iref, "Extreme Bull", RED   + "99"),
+        hline(20, iref, "Extreme Bear", GREEN + "99"),
+        hline(50, iref, "Neutral",       REFLINE),
+      );
       break;
     }
     case "4D": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(AreaSeries, { lineColor: C.amber, topColor: `${C.amber}44`, bottomColor: `${C.amber}00`, lineWidth: 2, title: "ATR % Extension" });
-      s.setData(raw.filter((d: any) => d.pctExtension != null).map((d: any) => ({ time: d.date, value: d.pctExtension })));
-      addHLine(s, 0, C.textDim, "0");
-      addHLine(s, 2, C.red, "+2 ATR");
-      addHLine(s, -2, C.green, "-2 ATR");
+      const x = raw.map((d: any) => d.date);
+      traces.push({
+        type: "scatter", mode: "lines",
+        x, y: raw.map((d: any) => d.pctExtension ?? null),
+        name: "ATR % Extension", yaxis: iref,
+        fill: "tozeroy", fillcolor: AMBER + "22",
+        line: { color: AMBER, width: 2.5 },
+        hovertemplate: "ATR Ext: %{y:.2f}<extra></extra>",
+      } as any);
+      shapes.push(
+        hline( 2, iref, "+2 ATR",  RED   + "99"),
+        hline(-2, iref, "-2 ATR",  GREEN + "99"),
+        hline( 0, iref, "0",        REFLINE),
+      );
       break;
     }
     case "4E": {
-      const raw = Array.isArray(data) ? data : [];
-      const s = chart.addSeries(AreaSeries, { lineColor: C.purple, topColor: `${C.purple}33`, bottomColor: `${C.purple}00`, lineWidth: 2, title: "RS Ratio" });
-      s.setData(toLineData(raw));
+      const x = raw.map((d: any) => d.date);
+      traces.push({
+        type: "scatter", mode: "lines",
+        x, y: raw.map((d: any) => d.value ?? null),
+        name: `${activeTicker}/SPY`, yaxis: iref,
+        fill: "tozeroy", fillcolor: PURPLE + "22",
+        line: { color: PURPLE, width: 2.5 },
+        hovertemplate: "RS: %{y:.4f}<extra></extra>",
+      } as any);
       break;
     }
 
     default: {
-      const raw = Array.isArray(data) ? data : [];
-      if (raw.length > 0) {
-        const s = chart.addSeries(LineSeries, { color: C.blue, lineWidth: 2, title: def.label });
-        s.setData(toLineData(raw));
+      // Generic fallback
+      const x = raw.map((d: any) => d.date);
+      if (raw.length > 0 && raw[0].value !== undefined) {
+        addLine(x, raw.map((d: any) => d.value ?? null), def.label, BLUE);
       }
     }
   }
 
-  chart.timeScale().fitContent();
+  // ── Build layout ─────────────────────────────────────────────────────────
+  const layout: Partial<Plotly.Layout> = {
+    ...baseLayout(),
+    margin: { l: 52, r: 60, t: 8, b: 40 },
+    shapes: shapes as any,
+    // top pane: y1 occupies 38–100%, bottom pane: y2 occupies 0–35%
+    ...(hasPricePane ? {
+      yaxis: {
+        ...axisStyle(),
+        domain: [0.38, 1.0],
+        title: { text: activeTicker, font: { size: 9, color: AXIS_CLR, family: FONT } },
+      },
+      yaxis2: {
+        ...axisStyle(),
+        domain: [0.0, 0.34],
+      },
+      xaxis: {
+        ...axisStyle(),
+        anchor: "y2",
+        matches: "x",
+      },
+    } : {
+      // No price pane — full height for indicator
+      yaxis2: { ...axisStyle() },
+      xaxis:  { ...axisStyle(), anchor: "y2" },
+    }),
+  } as any;
+
+  return { data: traces, layout };
 }
 
-// ─── SPY Volume Chart (standalone — split not needed) ────────────────────────
-// Top: SPY price line, Bottom: volume histogram (red when volume > 20d avg) + 20d avg line
-function SPYVolumeChart({ data, tf }: { data: any; tf: TF }) {
-  const topRef = useRef<HTMLDivElement>(null);
-  const botRef = useRef<HTMLDivElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!containerRef.current || !data?.length) return;
-    const container = containerRef.current;
-    container.innerHTML = "";
-
-    const totalH = container.clientHeight || 520;
-    const topH = Math.round(totalH * 0.55);
-    const botH = totalH - topH;
-
-    const topEl = document.createElement("div");
-    topEl.style.cssText = `width:100%;height:${topH}px;`;
-    container.appendChild(topEl);
-
-    const divider = document.createElement("div");
-    divider.style.cssText = `width:100%;height:1px;background:${C.border};`;
-    container.appendChild(divider);
-
-    const botEl = document.createElement("div");
-    botEl.style.cssText = `width:100%;height:${botH - 1}px;`;
-    container.appendChild(botEl);
-
-    const filtered = filterByTF(data, tf);
-
-    // Top: price line
-    const topChart = createChart(topEl, {
-      ...makeChartOpts(topH),
-      width: container.clientWidth,
-      timeScale: { borderColor: C.border, visible: false },
-    });
-    const priceSeries = topChart.addSeries(LineSeries, {
-      color: C.priceLine, lineWidth: 1, title: "SPY", priceLineVisible: false,
-    });
-    priceSeries.setData(
-      filtered.filter((d: any) => d.close != null).map((d: any) => ({ time: d.date as any, value: d.close }))
-    );
-
-    // Bottom: volume histogram + 20d avg line
-    const botChart = createChart(botEl, {
-      ...makeChartOpts(botH - 1),
-      width: container.clientWidth,
-      timeScale: { borderColor: C.border, timeVisible: true, secondsVisible: false },
-    });
-
-    const volSeries = botChart.addSeries(HistogramSeries, { title: "Volume" });
-    volSeries.setData(
-      filtered.filter((d: any) => d.volume != null).map((d: any) => ({
-        time: d.date as any,
-        value: d.volume,
-        color: d.avgVol20 != null && d.volume > d.avgVol20 ? `${C.red}cc` : `${C.blue}66`,
-      }))
-    );
-
-    const avgSeries = botChart.addSeries(LineSeries, {
-      color: C.amber, lineWidth: 1, lineStyle: LineStyle.Dashed, title: "20d Avg",
-    });
-    avgSeries.setData(
-      filtered.filter((d: any) => d.avgVol20 != null).map((d: any) => ({ time: d.date as any, value: d.avgVol20 }))
-    );
-
-    // Sync
-    topChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (range) botChart.timeScale().setVisibleLogicalRange(range);
-    });
-    botChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (range) topChart.timeScale().setVisibleLogicalRange(range);
-    });
-
-    topChart.timeScale().fitContent();
-    botChart.timeScale().fitContent();
-
-    const ro = new ResizeObserver(() => {
-      const w = container.clientWidth;
-      topChart.applyOptions({ width: w });
-      botChart.applyOptions({ width: w });
-    });
-    ro.observe(container);
-
-    return () => {
-      ro.disconnect();
-      topChart.remove();
-      botChart.remove();
-    };
-  }, [data, tf]); // eslint-disable-line
-
-  return <div ref={containerRef} style={{ width: "100%", height: "100%" }} />;
-}
-
-// ─── Multi-line chart (no split panel — for Fed BS, etc.) ────────────────────
-function SinglePaneChart({ data, def, tf }: { data: any; def: ChartDef; tf: TF }) {
-  const containerRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!containerRef.current || !data) return;
-    const container = containerRef.current;
-    container.innerHTML = "";
-
-    const chart = createChart(container, {
-      ...makeChartOpts(container.clientHeight || 480),
-      width: container.clientWidth,
-    });
-
-    const filtered = Array.isArray(data) ? filterByTF(data, tf) : data;
-
-    // 3D — Fed Balance Sheet
-    if (def.id === "3D") {
-      const raw = Array.isArray(filtered) ? filtered : [];
-      const s1 = chart.addSeries(AreaSeries, { lineColor: C.blue, topColor: `${C.blue}33`, bottomColor: `${C.blue}00`, lineWidth: 2, title: "Fed Assets ($B)" });
-      s1.setData(raw.filter((d: any) => d.fedBS != null).map((d: any) => ({ time: d.date, value: d.fedBS })));
-      const s2 = chart.addSeries(LineSeries, { color: C.green, lineWidth: 2, title: "SPY Price" });
-      s2.setData(raw.filter((d: any) => d.spyClose != null).map((d: any) => ({ time: d.date, value: d.spyClose })));
-    } else {
-      // generic fallback
-      const raw = Array.isArray(filtered) ? filtered : [];
-      if (raw.length > 0) {
-        const s = chart.addSeries(LineSeries, { color: C.blue, lineWidth: 2, title: def.label });
-        s.setData(toLineData(raw));
-      }
-    }
-
-    chart.timeScale().fitContent();
-
-    const ro = new ResizeObserver(() => {
-      chart.applyOptions({ width: container.clientWidth });
-    });
-    ro.observe(container);
-
-    return () => {
-      ro.disconnect();
-      chart.remove();
-    };
-  }, [data, tf]); // eslint-disable-line
-
-  return <div ref={containerRef} style={{ width: "100%", height: "100%" }} />;
-}
-
-// ─── Chart Panel (full card) ──────────────────────────────────────────────────
+// ─── ChartPanel component ─────────────────────────────────────────────────────
 function ChartPanel({ def, tf }: { def: ChartDef; tf: TF }) {
   const [activeTicker, setActiveTicker] = useState(def.defaultTicker ?? "SPY");
   const containerRef = useRef<HTMLDivElement>(null);
+  const [dims, setDims] = useState({ width: 800, height: 600 });
 
-  // Compute dynamic endpoint based on activeTicker
+  // Track container size via ResizeObserver
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const ro = new ResizeObserver(entries => {
+      for (const e of entries) {
+        const { width, height } = e.contentRect;
+        if (width > 0 && height > 0) setDims({ width, height });
+      }
+    });
+    ro.observe(containerRef.current);
+    return () => ro.disconnect();
+  }, []);
+
   const endpoint = useCallback(() => {
     if (def.id === "4A") return `/api/charts/tpo/${activeTicker}`;
     if (def.id === "4B") return `/api/charts/dsi/${activeTicker}`;
@@ -763,136 +619,130 @@ function ChartPanel({ def, tf }: { def: ChartDef; tf: TF }) {
     return def.endpoint;
   }, [def.id, def.endpoint, activeTicker]);
 
-  const priceTicker = def.id === "4A" || def.id === "4B" || def.id === "4D" || def.id === "4E"
+  const priceTicker = (def.id === "4A" || def.id === "4B" || def.id === "4D" || def.id === "4E")
     ? activeTicker
     : (def.priceTicker ?? "SPY");
 
-  const { data, isLoading, isError, refetch } = useQuery({
+  const { data: indData, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["chart", def.id, activeTicker],
     queryFn: async () => {
-      const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
       const res = await fetch(`${API_BASE}${endpoint()}`);
-      if (!res.ok) throw new Error(`${res.status}`);
-      return res.json();
+      if (!res.ok) {
+        const msg = `${def.id} fetch error: ${res.status} ${res.statusText} — ${endpoint()}`;
+        console.error("[ChartEngine]", msg);
+        throw new Error(msg);
+      }
+      const json = await res.json();
+      if (!Array.isArray(json) || json.length === 0) {
+        console.warn("[ChartEngine] No data returned for", def.id, endpoint());
+      }
+      return json;
     },
     staleTime: 5 * 60 * 1000,
     retry: 1,
   });
 
-  // Price data for top pane (only for split-panel charts)
   const { data: priceData } = useQuery({
     queryKey: ["chart-price", priceTicker],
     queryFn: async () => {
-      if (!def.splitPanel) return null;
-      const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
+      if (!def.priceTicker) return null;
       const res = await fetch(`${API_BASE}/api/charts/price/${priceTicker}`);
-      if (!res.ok) return null;
+      if (!res.ok) {
+        console.warn("[ChartEngine] Price fetch failed for", priceTicker);
+        return null;
+      }
       return res.json();
     },
     staleTime: 10 * 60 * 1000,
-    enabled: !!def.splitPanel,
+    enabled: !!def.priceTicker,
   });
 
-  // Split-panel chart hook
-  useSplitPanelChart({
-    containerRef,
-    priceData: def.splitPanel ? (priceData ?? null) : null,
-    indicatorData: def.splitPanel ? data : null,
-    def,
-    tf,
-    activeTicker,
-  });
+  const figure = (!isLoading && !isError && indData)
+    ? buildFigure(def, indData, priceData ?? null, tf, activeTicker)
+    : null;
 
-  const handleDownload = () => {
-    if (!containerRef.current) return;
-    const canvas = containerRef.current.querySelector("canvas");
-    if (!canvas) return;
-    const link = document.createElement("a");
-    link.download = `${def.id}-${def.label.replace(/\s+/g, "-")}-${tf}.png`;
-    link.href = canvas.toDataURL("image/png");
-    link.click();
-  };
-
-  const isScatter = def.id === "3E";
-  const isSPYVol = def.id === "4C";
-  const isNoSplit = !def.splitPanel; // 3D, 3E, 4C
+  const isEmpty = figure && (
+    Array.isArray(indData) && indData.length === 0
+  );
 
   return (
     <div style={{
-      background: C.panelBg,
-      border: `1px solid ${C.border}`,
+      background: "#08111e",
+      border: `1px solid #132035`,
       borderRadius: 4,
       display: "flex",
       flexDirection: "column",
       height: "100%",
-      minHeight: 500,
+      overflow: "hidden",
     }}>
-      {/* Panel Header */}
+      {/* Panel header */}
       <div style={{
-        borderBottom: `1px solid ${C.border}`,
-        padding: "8px 12px",
+        borderBottom: "1px solid #132035",
+        padding: "7px 12px",
         display: "flex",
         alignItems: "center",
         gap: 8,
         flexShrink: 0,
+        background: "#07101d",
       }}>
-        <span className="font-mono" style={{ fontSize: 10, color: C.textDim, letterSpacing: "0.05em" }}>{def.id}</span>
-        <span className="font-mono font-semibold" style={{ fontSize: 12, color: "#e2e8f0" }}>{def.label}</span>
-        <span className="font-mono" style={{ fontSize: 10, color: C.textDim, marginLeft: 4, flex: 1 }}>{def.desc}</span>
+        <span style={{ fontSize: 10, color: AXIS_CLR, fontFamily: FONT, letterSpacing: "0.05em" }}>{def.id}</span>
+        <span style={{ fontSize: 12, color: "#e2e8f0", fontFamily: FONT, fontWeight: 600 }}>{def.label}</span>
+        <span style={{ fontSize: 10, color: AXIS_CLR, fontFamily: FONT, flex: 1 }}>{def.desc}</span>
 
-        {/* Per-chart ticker selector */}
         {def.tickers && (
           <select
             value={activeTicker}
             onChange={e => setActiveTicker(e.target.value)}
-            style={{
-              background: C.bg, border: `1px solid ${C.border}`, color: C.text,
-              fontFamily: "IBM Plex Mono", fontSize: 10, padding: "2px 4px", borderRadius: 2,
-            }}
+            style={{ background: BG, border: "1px solid #132035", color: "#94a3b8", fontFamily: FONT, fontSize: 10, padding: "2px 6px", borderRadius: 2 }}
           >
             {def.tickers.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
         )}
 
-        <button
-          onClick={() => refetch()}
-          style={{ background: "none", border: "none", cursor: "pointer", color: C.textDim, padding: 2 }}
-          title="Refresh"
-        >
-          <RefreshCw size={12} />
-        </button>
-        <button
-          onClick={handleDownload}
-          style={{ background: "none", border: "none", cursor: "pointer", color: C.textDim, padding: 2 }}
-          title="Download PNG"
-        >
-          <Download size={12} />
+        <button onClick={() => refetch()} title="Refresh"
+          style={{ background: "none", border: "none", cursor: "pointer", color: AXIS_CLR, padding: 2 }}>
+          <RefreshCw size={11} />
         </button>
       </div>
 
-      {/* Chart Area */}
-      <div style={{ flex: 1, position: "relative", minHeight: 0 }}>
+      {/* Chart body */}
+      <div ref={containerRef} style={{ flex: 1, position: "relative", minHeight: 0 }}>
         {isLoading && (
-          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: C.panelBg, zIndex: 10 }}>
-            <div style={{ width: 32, height: 32, border: `2px solid ${C.border}`, borderTopColor: C.blue, borderRadius: "50%", animation: "spin 1s linear infinite" }} />
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "#08111e", zIndex: 10 }}>
+            <div style={{ width: 28, height: 28, border: `2px solid #132035`, borderTopColor: BLUE, borderRadius: "50%", animation: "spin 1s linear infinite" }} />
           </div>
         )}
-        {isError && !isLoading && (
-          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", color: C.textDim }}>
-            <span className="font-mono" style={{ fontSize: 11 }}>FETCH ERROR</span>
-            <button onClick={() => refetch()} style={{ marginTop: 8, background: C.border, border: "none", color: C.text, fontFamily: "IBM Plex Mono", fontSize: 10, padding: "4px 8px", cursor: "pointer", borderRadius: 2 }}>RETRY</button>
+        {isError && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8 }}>
+            <span style={{ color: RED, fontFamily: FONT, fontSize: 11 }}>FETCH ERROR</span>
+            <span style={{ color: AXIS_CLR, fontFamily: FONT, fontSize: 9, maxWidth: 320, textAlign: "center" }}>
+              {(error as Error)?.message}
+            </span>
+            <button onClick={() => refetch()}
+              style={{ background: "#132035", border: "none", color: "#94a3b8", fontFamily: FONT, fontSize: 10, padding: "4px 10px", cursor: "pointer", borderRadius: 2 }}>
+              RETRY
+            </button>
           </div>
         )}
-
-        {isScatter && data ? (
-          <SectorRotationChart data={data} />
-        ) : isSPYVol && data ? (
-          <SPYVolumeChart data={data} tf={tf} />
-        ) : isNoSplit && data ? (
-          <SinglePaneChart data={data} def={def} tf={tf} />
-        ) : (
-          // Split-panel: ref driven by useSplitPanelChart
-          <div ref={containerRef} style={{ width: "100%", height: "100%" }} />
+        {isEmpty && !isLoading && !isError && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+            <span style={{ color: AXIS_CLR, fontFamily: FONT, fontSize: 11 }}>NO DATA AVAILABLE</span>
+            <span style={{ color: AXIS_CLR, fontFamily: FONT, fontSize: 9, marginTop: 4 }}>Backend returned empty dataset for {def.id}</span>
+          </div>
+        )}
+        {figure && !isEmpty && dims.width > 0 && (
+          <Plot
+            data={figure.data}
+            layout={{
+              ...figure.layout,
+              width: dims.width,
+              height: dims.height,
+              autosize: false,
+            }}
+            config={PLOTLY_CONFIG}
+            style={{ width: "100%", height: "100%", display: "block" }}
+            useResizeHandler={true}
+          />
         )}
       </div>
     </div>
@@ -908,56 +758,51 @@ function Sidebar({
   collapsed: Record<string, boolean>;
   setCollapsed: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
 }) {
-  const toggle = (catId: string) => setCollapsed(p => ({ ...p, [catId]: !p[catId] }));
-
+  const toggle = (id: string) => setCollapsed(p => ({ ...p, [id]: !p[id] }));
   return (
     <div style={{
-      width: 260, flexShrink: 0, background: "#08111e", borderRight: `1px solid ${C.border}`,
-      display: "flex", flexDirection: "column", overflowY: "auto",
+      width: 240, flexShrink: 0,
+      background: "#07101d",
+      borderRight: "1px solid #132035",
+      display: "flex", flexDirection: "column",
+      overflowY: "auto",
     }}>
-      <div style={{ padding: "10px 12px", borderBottom: `1px solid ${C.border}` }}>
-        <span className="font-mono" style={{ fontSize: 9, letterSpacing: "0.15em", color: C.textDim }}>CMT CHART ENGINE</span>
+      <div style={{ padding: "10px 12px", borderBottom: "1px solid #132035" }}>
+        <span style={{ fontFamily: FONT, fontSize: 9, letterSpacing: "0.15em", color: AXIS_CLR }}>CMT CHART ENGINE</span>
       </div>
 
       {CATEGORIES.map(cat => {
         const catCharts = CHARTS.filter(c => c.category === cat.id);
         const Icon = cat.icon;
         const isOpen = !collapsed[cat.id];
-
         return (
           <div key={cat.id}>
-            <button
-              onClick={() => toggle(cat.id)}
-              style={{
-                width: "100%", display: "flex", alignItems: "center", gap: 6, padding: "8px 12px",
-                background: "none", border: "none", cursor: "pointer", borderBottom: `1px solid ${C.border}22`,
-              }}
-            >
+            <button onClick={() => toggle(cat.id)} style={{
+              width: "100%", display: "flex", alignItems: "center", gap: 6, padding: "8px 12px",
+              background: "none", border: "none", cursor: "pointer",
+              borderBottom: "1px solid #0d1f3522",
+            }}>
               <Icon size={12} color={cat.color} />
-              <span className="font-mono" style={{ fontSize: 10, color: cat.color, letterSpacing: "0.08em", flex: 1, textAlign: "left" }}>
+              <span style={{ fontFamily: FONT, fontSize: 10, color: cat.color, letterSpacing: "0.08em", flex: 1, textAlign: "left" }}>
                 {cat.label.toUpperCase()}
               </span>
-              {isOpen ? <ChevronDown size={12} color={C.textDim} /> : <ChevronRight size={12} color={C.textDim} />}
+              {isOpen ? <ChevronDown size={11} color={AXIS_CLR} /> : <ChevronRight size={11} color={AXIS_CLR} />}
             </button>
-
             {isOpen && catCharts.map(chart => (
-              <button
-                key={chart.id}
-                onClick={() => onSelect(chart.id)}
-                style={{
-                  width: "100%", display: "flex", alignItems: "flex-start", gap: 8,
-                  padding: "7px 12px 7px 20px",
-                  background: selected === chart.id ? `${cat.color}15` : "none",
-                  border: "none",
-                  borderLeft: selected === chart.id ? `2px solid ${cat.color}` : "2px solid transparent",
-                  cursor: "pointer",
-                  textAlign: "left",
-                }}
-              >
-                <span className="font-mono" style={{ fontSize: 9, color: selected === chart.id ? cat.color : C.textDim, minWidth: 20, paddingTop: 1 }}>{chart.id}</span>
+              <button key={chart.id} onClick={() => onSelect(chart.id)} style={{
+                width: "100%", display: "flex", alignItems: "flex-start", gap: 8,
+                padding: "7px 12px 7px 20px",
+                background: selected === chart.id ? `${cat.color}15` : "none",
+                border: "none",
+                borderLeft: selected === chart.id ? `2px solid ${cat.color}` : "2px solid transparent",
+                cursor: "pointer", textAlign: "left",
+              }}>
+                <span style={{ fontFamily: FONT, fontSize: 9, color: selected === chart.id ? cat.color : AXIS_CLR, minWidth: 20, paddingTop: 1 }}>
+                  {chart.id}
+                </span>
                 <div>
-                  <div className="font-mono" style={{ fontSize: 11, color: selected === chart.id ? "#e2e8f0" : C.text }}>{chart.label}</div>
-                  <div className="font-mono" style={{ fontSize: 9, color: C.textDim, marginTop: 1, lineHeight: 1.3 }}>{chart.desc}</div>
+                  <div style={{ fontFamily: FONT, fontSize: 11, color: selected === chart.id ? "#e2e8f0" : "#94a3b8" }}>{chart.label}</div>
+                  <div style={{ fontFamily: FONT, fontSize: 9, color: AXIS_CLR, marginTop: 1, lineHeight: 1.3 }}>{chart.desc}</div>
                 </div>
               </button>
             ))}
@@ -968,7 +813,7 @@ function Sidebar({
   );
 }
 
-// ─── Main ChartEngine Component ───────────────────────────────────────────────
+// ─── Main ChartEngine ─────────────────────────────────────────────────────────
 export default function ChartEngine() {
   const [selected, setSelected] = useState("1A");
   const [tf, setTF] = useState<TF>("2Y");
@@ -978,45 +823,41 @@ export default function ChartEngine() {
   const activeCat = CATEGORIES.find(c => c.id === activeDef.category);
 
   return (
-    <div style={{ display: "flex", height: "100%", background: C.bg, fontFamily: "'IBM Plex Mono', monospace", overflow: "hidden" }}>
+    <div style={{
+      display: "flex", width: "100%", height: "100%",
+      background: BG, overflow: "hidden",
+    }}>
       <Sidebar selected={selected} onSelect={setSelected} collapsed={collapsed} setCollapsed={setCollapsed} />
 
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      {/* Right side: topbar + chart fills all remaining space */}
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
         {/* Top bar */}
         <div style={{
-          display: "flex", alignItems: "center", gap: 12, padding: "8px 16px",
-          borderBottom: `1px solid ${C.border}`, background: "#08111e", flexShrink: 0,
+          display: "flex", alignItems: "center", gap: 10, padding: "7px 14px",
+          borderBottom: "1px solid #132035", background: "#07101d", flexShrink: 0,
         }}>
-          <Layers size={14} color={activeCat?.color ?? C.accent} />
-          <span className="font-mono font-semibold" style={{ fontSize: 13, color: "#e2e8f0" }}>
-            {activeDef.label}
-          </span>
-          <span className="font-mono" style={{ fontSize: 10, color: C.textDim }}>
-            {activeDef.desc}
-          </span>
+          <Layers size={13} color={activeCat?.color ?? ACCENT} />
+          <span style={{ fontFamily: FONT, fontSize: 12, color: "#e2e8f0", fontWeight: 600 }}>{activeDef.label}</span>
+          <span style={{ fontFamily: FONT, fontSize: 10, color: AXIS_CLR, flex: 1 }}>{activeDef.desc}</span>
 
-          <div style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
-            {(["1Y", "2Y", "5Y", "10Y"] as TF[]).map(t => (
-              <button
-                key={t}
-                onClick={() => setTF(t)}
-                style={{
-                  background: tf === t ? `${C.blue}22` : "none",
-                  border: `1px solid ${tf === t ? C.blue : C.border}`,
-                  color: tf === t ? C.blue : C.textDim,
-                  fontFamily: "IBM Plex Mono",
-                  fontSize: 10, padding: "3px 8px", cursor: "pointer", borderRadius: 2,
-                }}
-              >
-                {t}
-              </button>
+          <div style={{ display: "flex", gap: 4 }}>
+            {(["1Y","2Y","5Y","10Y"] as TF[]).map(t => (
+              <button key={t} onClick={() => setTF(t)} style={{
+                background: tf === t ? `${BLUE}22` : "none",
+                border: `1px solid ${tf === t ? BLUE : "#132035"}`,
+                color: tf === t ? BLUE : AXIS_CLR,
+                fontFamily: FONT, fontSize: 10,
+                padding: "3px 8px", cursor: "pointer", borderRadius: 2,
+              }}>{t}</button>
             ))}
           </div>
         </div>
 
-        {/* Chart area — key forces full remount on chart change */}
-        <div style={{ flex: 1, padding: 16, overflow: "auto" }}>
-          <ChartPanel key={`${selected}-${tf}`} def={activeDef} tf={tf} />
+        {/* Chart — takes ALL remaining height */}
+        <div style={{ flex: 1, padding: 12, overflow: "hidden", minHeight: 0, display: "flex" }}>
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
+            <ChartPanel key={`${selected}-${tf}`} def={activeDef} tf={tf} />
+          </div>
         </div>
       </div>
 
