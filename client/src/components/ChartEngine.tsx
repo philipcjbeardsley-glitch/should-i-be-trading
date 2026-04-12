@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/queryClient";
 import {
   ChevronDown, ChevronRight, RefreshCw, Download, BarChart2,
   Activity, TrendingUp, Globe, Layers
@@ -450,7 +449,12 @@ function ChartPanel({ def, tf }: { def: ChartDef; tf: TF }) {
 
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ["chart", def.id, activeTicker],
-    queryFn: () => apiRequest("GET", endpoint()),
+    queryFn: async () => {
+      const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
+      const res = await fetch(`${API_BASE}${endpoint()}`);
+      if (!res.ok) throw new Error(`${res.status}`);
+      return res.json();
+    },
     staleTime: 5 * 60 * 1000,
     retry: 1,
   });
