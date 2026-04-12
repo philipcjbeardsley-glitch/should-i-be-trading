@@ -46,7 +46,7 @@ function winRateColor(v: number): string {
 }
 
 // ── Condition Builder ─────────────────────────────────────────────────────────
-type ConditionType = "price_change_pct" | "price_above_ma" | "rsi" | "volume_surge" | "gap_up" | "near_52w_high" | "near_52w_low";
+type ConditionType = "price_change_pct" | "price_above_ma" | "price_extended_pct" | "rsi" | "volume_surge" | "gap_up" | "near_52w_high" | "near_52w_low";
 
 interface ConditionRow {
   id: number;
@@ -54,11 +54,13 @@ interface ConditionRow {
   direction: string;
   value: string;
   lookback: string;
+  useEMA?: boolean;
 }
 
 const CONDITION_LABELS: Record<ConditionType, string> = {
   price_change_pct: "Price Change %",
-  price_above_ma: "Price vs MA",
+  price_above_ma: "Price vs SMA",
+  price_extended_pct: "% Extended vs EMA/SMA",
   rsi: "RSI",
   volume_surge: "Volume Surge",
   gap_up: "Gap Up %",
@@ -92,7 +94,7 @@ function ConditionBuilder({ conditions, onChange }: { conditions: ConditionRow[]
             {Object.entries(CONDITION_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
           </select>
 
-          {(c.type === "price_change_pct" || c.type === "rsi" || c.type === "price_above_ma") && (
+          {(c.type === "price_change_pct" || c.type === "rsi" || c.type === "price_above_ma" || c.type === "price_extended_pct") && (
             <select value={c.direction} onChange={e => updateRow(c.id, "direction", e.target.value)} style={{ ...selectStyle, minWidth: 70 }}>
               {c.type === "price_change_pct" ? (
                 <><option value="up">Up</option><option value="down">Down</option></>
@@ -102,16 +104,16 @@ function ConditionBuilder({ conditions, onChange }: { conditions: ConditionRow[]
             </select>
           )}
 
-          {c.type !== "near_52w_high" && c.type !== "near_52w_low" && (
+          {c.type !== "near_52w_high" && c.type !== "near_52w_low" && c.type !== "price_above_ma" && (
             <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
               <input
                 type="number" value={c.value}
                 onChange={e => updateRow(c.id, "value", e.target.value)}
                 style={{ ...inputStyle, width: 60 }}
-                placeholder={c.type === "volume_surge" ? "2" : c.type === "price_above_ma" ? "50" : "5"}
+                placeholder={c.type === "volume_surge" ? "2" : "5"}
               />
               <span className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)" }}>
-                {c.type === "volume_surge" ? "× avg vol" : c.type === "price_above_ma" ? "dma" : "%"}
+                {c.type === "volume_surge" ? "× avg vol" : "%"}
               </span>
             </div>
           )}
@@ -126,6 +128,29 @@ function ConditionBuilder({ conditions, onChange }: { conditions: ConditionRow[]
               />
               <span className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)" }}>days</span>
             </div>
+          )}
+
+          {(c.type === "price_above_ma" || c.type === "price_extended_pct") && (
+            <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+              <input
+                type="number" value={c.lookback}
+                onChange={e => updateRow(c.id, "lookback", e.target.value)}
+                style={{ ...inputStyle, width: 50 }}
+                placeholder="20"
+              />
+              <span className="font-mono" style={{ fontSize: 9, color: "var(--bb-text-faint)" }}>-period</span>
+            </div>
+          )}
+
+          {c.type === "price_extended_pct" && (
+            <select
+              value={c.useEMA !== false ? "ema" : "sma"}
+              onChange={e => onChange(conditions.map(r => r.id === c.id ? { ...r, useEMA: e.target.value === "ema" } : r))}
+              style={{ ...selectStyle, minWidth: 60 }}
+            >
+              <option value="ema">EMA</option>
+              <option value="sma">SMA</option>
+            </select>
           )}
 
           <button onClick={() => removeRow(c.id)} style={{
@@ -161,10 +186,10 @@ export default function HistoricalExpectancy() {
     "TSLA up 15% in 10 days",
     "SPY down 5% in 5 days",
     "NVDA up 20% in 5 days and RSI above 70",
+    "AMZN up 18.5% in 8 sessions, RSI >70, price >10% extended above 20 EMA",
     "AAPL above 200dma",
     "AMZN gap up 5%",
     "SPY near 52-week high",
-    "QQQ down 10% in 21 days",
   ];
 
   async function runQuery() {
@@ -185,6 +210,7 @@ export default function HistoricalExpectancy() {
           direction: c.direction || undefined,
           value: parseFloat(c.value) || 0,
           lookback: c.lookback ? parseInt(c.lookback) : undefined,
+          useEMA: c.useEMA,
         }));
         body = { ticker: ticker.toUpperCase(), conditions: mappedConditions };
       }

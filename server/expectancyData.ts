@@ -58,20 +58,22 @@ export async function fetchHistory(ticker: string): Promise<{
 // ── Condition types ──────────────────────────────────────────────────────────
 
 export type ConditionType =
-  | "price_change_pct"   // price up/down X% over Y days
-  | "price_above_ma"     // price above/below N-day MA
-  | "rsi"                // RSI above/below threshold
-  | "volume_surge"       // volume N× above avg
-  | "price_level"        // price above/below $X
-  | "gap_up"             // gap up X% on open
-  | "near_52w_high"      // within X% of 52-week high
-  | "near_52w_low";      // within X% of 52-week low
+  | "price_change_pct"     // price up/down X% over Y days
+  | "price_above_ma"       // price above/below N-day SMA
+  | "price_extended_pct"   // price is X% above/below N-period EMA
+  | "rsi"                  // RSI above/below threshold
+  | "volume_surge"         // volume N× above avg
+  | "price_level"          // price above/below $X
+  | "gap_up"               // gap up X% on open
+  | "near_52w_high"        // within X% of 52-week high
+  | "near_52w_low";        // within X% of 52-week low
 
 export interface Condition {
   type: ConditionType;
   direction?: "above" | "below" | "up" | "down"; // for price_change, rsi, ma, price_level
   value: number;        // threshold (pct, level, multiplier, etc.)
-  lookback?: number;    // days window (for price_change)
+  lookback?: number;    // days window (for price_change) or MA period
+  useEMA?: boolean;     // for price_extended_pct: true = EMA, false = SMA
 }
 
 export interface QueryParams {
@@ -99,6 +101,18 @@ function calcRSI(closes: number[], period = 14, i: number): number | null {
 function calcMA(closes: number[], period: number, i: number): number | null {
   if (i < period - 1) return null;
   return closes.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0) / period;
+}
+
+// Exponential Moving Average — computed iteratively from the start of available data
+function calcEMA(closes: number[], period: number, i: number): number | null {
+  if (i < period - 1) return null;
+  // Seed: SMA of first `period` bars
+  let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  const k = 2 / (period + 1);
+  for (let j = period; j <= i; j++) {
+    ema = closes[j] * k + ema * (1 - k);
+  }
+  return ema;
 }
 
 function calcATR(highs: number[], lows: number[], closes: number[], period = 14, i: number): number | null {
@@ -147,6 +161,17 @@ function evaluateCondition(
       if (cond.direction === "above") return price > ma;
       if (cond.direction === "below") return price < ma;
       return false;
+    }
+
+    case "price_extended_pct": {
+      // Price is X% above/below an EMA (or SMA if useEMA=false)
+      const period = cond.lookback ?? 20;
+      const ma = cond.useEMA !== false ? calcEMA(closes, period, i) : calcMA(closes, period, i);
+      if (ma === null || ma === 0) return false;
+      const extensionPct = ((price - ma) / ma) * 100;
+      if (cond.direction === "above") return extensionPct >= cond.value;
+      if (cond.direction === "below") return extensionPct <= -Math.abs(cond.value);
+      return Math.abs(extensionPct) >= cond.value;
     }
 
     case "rsi": {
@@ -380,11 +405,30 @@ export function parseNaturalQuery(query: string): QueryParams | null {
     conditions.push({ type: "rsi", direction: dir, value: parseFloat(rsiMatch[2]) });
   }
 
-  // "above/below Xdma" or "above X-day MA"
-  const maMatch = q.match(/(above|below)\s*([\d]+)\s*(?:d|day|-)?\s*(?:ma|sma|ema)/);
-  if (maMatch) {
-    const dir = maMatch[1] as "above" | "below";
-    conditions.push({ type: "price_above_ma", direction: dir, value: 0, lookback: parseInt(maMatch[2]) });
+  // "price >X% extended above/below Y EMA/SMA" — must come BEFORE the simple MA match
+  // Handles: "price >10% extended above 20 EMA", "extended 10% above 20 EMA",
+  //           ">10% above 20ema", "10% extended above 20-day EMA", ">X% above YEMA"
+  const extendedMatch = q.match(
+    /(?:price\s*)?[>≥]?\s*([\d.]+)\s*%?\s*(?:extended\s+)?(above|below)\s+([\d]+)[\s-]*(?:day|d)?[\s-]*(?:period)?[\s-]*(ema|sma)/
+  ) || q.match(
+    /(?:extended|ext)\s+([\d.]+)\s*%\s*(above|below)\s+([\d]+)[\s-]*(?:day|d)?[\s-]*(ema|sma)/
+  ) || q.match(
+    /price\s+(?:is\s+)?(?:more\s+than\s+)?([\d.]+)\s*%\s*(above|below)\s+(?:the\s+)?([\d]+)[\s-]*(?:day|d)?[\s-]*(ema|sma)/
+  );
+  if (extendedMatch) {
+    const pct = parseFloat(extendedMatch[1]);
+    const dir = extendedMatch[2] as "above" | "below";
+    const period = parseInt(extendedMatch[3]);
+    const useEMA = extendedMatch[4] === "ema";
+    conditions.push({ type: "price_extended_pct", direction: dir, value: pct, lookback: period, useEMA });
+  } else {
+    // "above/below Xdma" or "above X-day MA" — simple price-above-MA (no extension %)
+    const maMatch = q.match(/(above|below)\s+([\d]+)[\s-]*(?:d|day|-)?\s*(?:ma|sma|dma)/) ||
+                    q.match(/(above|below)\s+([\d]+)[\s-]*(?:d|day|-)?\s*(ema)(?!\s*[\d])/);
+    if (maMatch) {
+      const dir = maMatch[1] as "above" | "below";
+      conditions.push({ type: "price_above_ma", direction: dir, value: 0, lookback: parseInt(maMatch[2]) });
+    }
   }
 
   // "gap up X%"
@@ -419,6 +463,8 @@ function buildLabel(params: QueryParams): string {
         return `${c.direction === "down" ? "down" : "up"} ${c.value}%+ in ${c.lookback}d`;
       case "price_above_ma":
         return `${c.direction} ${c.lookback}dma`;
+      case "price_extended_pct":
+        return `price >${c.value}% ${c.direction} ${c.lookback}-period ${c.useEMA !== false ? "EMA" : "SMA"}`;
       case "rsi":
         return `RSI ${c.direction} ${c.value}`;
       case "volume_surge":
