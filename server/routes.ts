@@ -9,7 +9,7 @@ import {
   getBreadthData, getMacroData, getLiquidityComposite, getYieldCurve,
   getCreditSpreads, getFedBalanceSheet, getSectorRotation, getRatioData,
   getCOTData as getChartCOTData, getCTAModel, getTrendPower, getDSI, getATRExtension,
-  fetchOHLCV,
+  fetchOHLCV, getSPYVolume, getSpeculativeVolume, getMarketSentimentComposite,
 } from "./chartData";
 
 let cachedDashboard: any = null;
@@ -323,6 +323,36 @@ export async function registerRoutes(httpServer: Server, app: Express) {
   app.get("/api/charts/atr-ext/:ticker", async (req, res) => {
     try {
       const data = await getATRExtension(req.params.ticker);
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // SPY Volume
+  app.get("/api/charts/spy-volume", async (_req, res) => {
+    try {
+      const data = await getSPYVolume();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Speculative Options Volume proxy
+  app.get("/api/charts/spec-vol", async (_req, res) => {
+    try {
+      const data = await getSpeculativeVolume();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Market Sentiment Composite
+  app.get("/api/charts/sentiment", async (_req, res) => {
+    try {
+      const data = await getMarketSentimentComposite();
       res.json(data);
     } catch (err: any) {
       res.status(500).json({ error: err?.message });
