@@ -146,18 +146,27 @@ export async function registerRoutes(httpServer: Server, app: Express) {
   // Historical Expectancy
   app.post("/api/expectancy", async (req, res) => {
     try {
-      const { query, ticker, conditions, label } = req.body;
+      const { query, ticker, conditions, group, label, logic } = req.body;
       let params: any = null;
 
       if (query && typeof query === "string") {
+        // Natural language path
         params = parseNaturalQuery(query);
         if (!params) {
-          return res.status(400).json({ error: "Could not parse query. Try: 'TSLA up 10% in 5 days' or 'QQQ up 8% in 6 days and RSI above 65'" });
+          return res.status(400).json({ error: "Could not parse query. Try: 'TSLA up 10% in 5 days' or 'AMZN up 18.5% in 8 days, RSI above 70, price >10% extended above 20 EMA'" });
         }
+      } else if (ticker && group) {
+        // New structured path: full ConditionGroup tree
+        params = { ticker, group, label };
       } else if (ticker && conditions) {
-        params = { ticker, conditions, label };
+        // Legacy flat array path: wrap into an AND group for backward compat
+        params = {
+          ticker,
+          label,
+          group: { logic: logic ?? "AND", conditions },
+        };
       } else {
-        return res.status(400).json({ error: "Provide either a natural language 'query' string or 'ticker' + 'conditions' array" });
+        return res.status(400).json({ error: "Provide either a natural language 'query' string, or 'ticker' + 'group', or 'ticker' + 'conditions'" });
       }
 
       const result = await runExpectancyQuery(params);

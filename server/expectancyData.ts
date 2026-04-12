@@ -11,7 +11,8 @@ function setCached(key: string, data: any) {
   cache.set(key, { data, timestamp: Date.now() });
 }
 
-// Fetch full daily OHLCV history for a ticker (up to 10 years)
+// ── OHLCV fetcher ─────────────────────────────────────────────────────────────
+
 export async function fetchHistory(ticker: string): Promise<{
   dates: string[];
   opens: number[];
@@ -55,34 +56,61 @@ export async function fetchHistory(ticker: string): Promise<{
   }
 }
 
-// ── Condition types ──────────────────────────────────────────────────────────
+// ── Condition schema ──────────────────────────────────────────────────────────
+//
+// A ConditionGroup is a boolean tree: each node is either a leaf Condition
+// or a group of sub-nodes joined by AND or OR.
+//
+// Example:
+//   { logic: "AND", conditions: [
+//     { type: "price_change_pct", direction: "up", value: 18.5, lookback: 8 },
+//     { type: "rsi", direction: "above", value: 70 },
+//     { type: "price_extended_pct", direction: "above", value: 10, lookback: 20, useEMA: true }
+//   ]}
+//
+// For OR at the top level:
+//   { logic: "OR", conditions: [
+//     { type: "rsi", direction: "above", value: 75 },
+//     { type: "bb_width", direction: "above", value: 0.1 }
+//   ]}
 
 export type ConditionType =
-  | "price_change_pct"     // price up/down X% over Y days
-  | "price_above_ma"       // price above/below N-day SMA
-  | "price_extended_pct"   // price is X% above/below N-period EMA
-  | "rsi"                  // RSI above/below threshold
-  | "volume_surge"         // volume N× above avg
-  | "price_level"          // price above/below $X
-  | "gap_up"               // gap up X% on open
-  | "near_52w_high"        // within X% of 52-week high
-  | "near_52w_low";        // within X% of 52-week low
+  | "price_change_pct"    // price up/down X% over Y days
+  | "price_above_ma"      // price above/below N-day SMA
+  | "price_extended_pct"  // price is X% above/below N-period EMA or SMA
+  | "rsi"                 // RSI above/below threshold
+  | "bb_width"            // Bollinger Band Width above/below threshold
+  | "bb_position"         // price above/below upper or lower BB
+  | "volume_surge"        // volume N× above 20d avg
+  | "gap_up"              // gap up X% on open vs prev close
+  | "near_52w_high"       // within X% of 52-week high
+  | "near_52w_low";       // within X% of 52-week low
 
 export interface Condition {
   type: ConditionType;
-  direction?: "above" | "below" | "up" | "down"; // for price_change, rsi, ma, price_level
-  value: number;        // threshold (pct, level, multiplier, etc.)
-  lookback?: number;    // days window (for price_change) or MA period
-  useEMA?: boolean;     // for price_extended_pct: true = EMA, false = SMA
+  direction?: "above" | "below" | "up" | "down";
+  value: number;
+  lookback?: number;   // days window or MA/BB period
+  useEMA?: boolean;    // for price_extended_pct: true=EMA (default), false=SMA
+  bbPeriod?: number;   // for BB conditions, default 20
+  bbStdDev?: number;   // for BB conditions, default 2
 }
 
+export type Logic = "AND" | "OR";
+
+export interface ConditionGroup {
+  logic: Logic;
+  conditions: Array<Condition | ConditionGroup>;
+}
+
+// Top-level query params — now accepts a ConditionGroup instead of flat array
 export interface QueryParams {
   ticker: string;
-  conditions: Condition[];
-  label?: string;       // optional human-readable label
+  group: ConditionGroup;
+  label?: string;
 }
 
-// ── Technical indicators ─────────────────────────────────────────────────────
+// ── Technical indicators ──────────────────────────────────────────────────────
 
 function calcRSI(closes: number[], period = 14, i: number): number | null {
   if (i < period) return null;
@@ -94,19 +122,16 @@ function calcRSI(closes: number[], period = 14, i: number): number | null {
   const avgGain = gains / period;
   const avgLoss = losses / period;
   if (avgLoss === 0) return 100;
-  const rs = avgGain / avgLoss;
-  return 100 - 100 / (1 + rs);
+  return 100 - 100 / (1 + avgGain / avgLoss);
 }
 
-function calcMA(closes: number[], period: number, i: number): number | null {
+function calcSMA(closes: number[], period: number, i: number): number | null {
   if (i < period - 1) return null;
   return closes.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0) / period;
 }
 
-// Exponential Moving Average — computed iteratively from the start of available data
 function calcEMA(closes: number[], period: number, i: number): number | null {
   if (i < period - 1) return null;
-  // Seed: SMA of first `period` bars
   let ema = closes.slice(0, period).reduce((a, b) => a + b, 0) / period;
   const k = 2 / (period + 1);
   for (let j = period; j <= i; j++) {
@@ -115,23 +140,21 @@ function calcEMA(closes: number[], period: number, i: number): number | null {
   return ema;
 }
 
-function calcATR(highs: number[], lows: number[], closes: number[], period = 14, i: number): number | null {
-  if (i < period) return null;
-  let sum = 0;
-  for (let j = i - period + 1; j <= i; j++) {
-    const tr = Math.max(
-      highs[j] - lows[j],
-      Math.abs(highs[j] - closes[j - 1]),
-      Math.abs(lows[j] - closes[j - 1])
-    );
-    sum += tr;
-  }
-  return sum / period;
+// Bollinger Band Width = (upper - lower) / middle  (normalized, no units)
+function calcBBWidth(closes: number[], period: number, stdMult: number, i: number): number | null {
+  const sma = calcSMA(closes, period, i);
+  if (sma === null) return null;
+  const slice = closes.slice(i - period + 1, i + 1);
+  const variance = slice.reduce((a, b) => a + Math.pow(b - sma, 2), 0) / period;
+  const std = Math.sqrt(variance);
+  const upper = sma + stdMult * std;
+  const lower = sma - stdMult * std;
+  return (upper - lower) / sma;
 }
 
-// ── Condition evaluator ──────────────────────────────────────────────────────
+// ── Leaf condition evaluator ──────────────────────────────────────────────────
 
-function evaluateCondition(
+function evalLeaf(
   cond: Condition,
   i: number,
   closes: number[],
@@ -156,7 +179,7 @@ function evaluateCondition(
     }
 
     case "price_above_ma": {
-      const ma = calcMA(closes, cond.lookback ?? 50, i);
+      const ma = calcSMA(closes, cond.lookback ?? 50, i);
       if (ma === null) return false;
       if (cond.direction === "above") return price > ma;
       if (cond.direction === "below") return price < ma;
@@ -164,14 +187,15 @@ function evaluateCondition(
     }
 
     case "price_extended_pct": {
-      // Price is X% above/below an EMA (or SMA if useEMA=false)
       const period = cond.lookback ?? 20;
-      const ma = cond.useEMA !== false ? calcEMA(closes, period, i) : calcMA(closes, period, i);
+      const ma = cond.useEMA !== false
+        ? calcEMA(closes, period, i)
+        : calcSMA(closes, period, i);
       if (ma === null || ma === 0) return false;
-      const extensionPct = ((price - ma) / ma) * 100;
-      if (cond.direction === "above") return extensionPct >= cond.value;
-      if (cond.direction === "below") return extensionPct <= -Math.abs(cond.value);
-      return Math.abs(extensionPct) >= cond.value;
+      const ext = ((price - ma) / ma) * 100;
+      if (cond.direction === "above") return ext >= cond.value;
+      if (cond.direction === "below") return ext <= -Math.abs(cond.value);
+      return Math.abs(ext) >= cond.value;
     }
 
     case "rsi": {
@@ -182,16 +206,34 @@ function evaluateCondition(
       return false;
     }
 
+    case "bb_width": {
+      const period = cond.bbPeriod ?? 20;
+      const mult = cond.bbStdDev ?? 2;
+      const bbw = calcBBWidth(closes, period, mult, i);
+      if (bbw === null) return false;
+      if (cond.direction === "above") return bbw >= cond.value;
+      if (cond.direction === "below") return bbw <= cond.value;
+      return false;
+    }
+
+    case "bb_position": {
+      const period = cond.bbPeriod ?? 20;
+      const mult = cond.bbStdDev ?? 2;
+      const sma = calcSMA(closes, period, i);
+      if (sma === null) return false;
+      const slice = closes.slice(i - period + 1, i + 1);
+      const std = Math.sqrt(slice.reduce((a, b) => a + Math.pow(b - sma, 2), 0) / period);
+      const upper = sma + mult * std;
+      const lower = sma - mult * std;
+      if (cond.direction === "above") return price >= upper;   // above upper band
+      if (cond.direction === "below") return price <= lower;   // below lower band
+      return false;
+    }
+
     case "volume_surge": {
       const avgVol = volumes.slice(Math.max(0, i - 20), i).reduce((a, b) => a + (b ?? 0), 0) / 20;
       if (!avgVol) return false;
       return (volumes[i] ?? 0) >= avgVol * cond.value;
-    }
-
-    case "price_level": {
-      if (cond.direction === "above") return price >= cond.value;
-      if (cond.direction === "below") return price <= cond.value;
-      return false;
     }
 
     case "gap_up": {
@@ -205,15 +247,13 @@ function evaluateCondition(
     case "near_52w_high": {
       const window = Math.min(i, 252);
       const high52 = Math.max(...closes.slice(i - window, i + 1));
-      const pctFromHigh = ((high52 - price) / high52) * 100;
-      return pctFromHigh <= cond.value; // within X% of high
+      return ((high52 - price) / high52) * 100 <= cond.value;
     }
 
     case "near_52w_low": {
       const window = Math.min(i, 252);
       const low52 = Math.min(...closes.slice(i - window, i + 1).filter(v => v > 0));
-      const pctFromLow = ((price - low52) / low52) * 100;
-      return pctFromLow <= cond.value; // within X% of low
+      return ((price - low52) / low52) * 100 <= cond.value;
     }
 
     default:
@@ -221,10 +261,33 @@ function evaluateCondition(
   }
 }
 
-// ── Forward returns calculator ───────────────────────────────────────────────
+// ── Recursive group evaluator ─────────────────────────────────────────────────
+
+function evalGroup(
+  node: Condition | ConditionGroup,
+  i: number,
+  closes: number[],
+  opens: number[],
+  highs: number[],
+  lows: number[],
+  volumes: number[]
+): boolean {
+  // Is it a leaf Condition or a ConditionGroup?
+  if ("logic" in node) {
+    const g = node as ConditionGroup;
+    if (g.logic === "AND") {
+      return g.conditions.every(child => evalGroup(child, i, closes, opens, highs, lows, volumes));
+    } else {
+      return g.conditions.some(child => evalGroup(child, i, closes, opens, highs, lows, volumes));
+    }
+  } else {
+    return evalLeaf(node as Condition, i, closes, opens, highs, lows, volumes);
+  }
+}
+
+// ── Forward returns ───────────────────────────────────────────────────────────
 
 const FORWARD_WINDOWS = [
-  { label: "0+C", days: 0 },   // same day close vs open
   { label: "1D", days: 1 },
   { label: "1W", days: 5 },
   { label: "1M", days: 21 },
@@ -233,16 +296,15 @@ const FORWARD_WINDOWS = [
 ];
 
 function forwardReturn(closes: number[], i: number, days: number): number | null {
-  if (days === 0) return null; // placeholder
   const future = closes[i + days];
   if (!future) return null;
   return ((future - closes[i]) / closes[i]) * 100;
 }
 
-// ── Main query engine ────────────────────────────────────────────────────────
+// ── Main query engine ─────────────────────────────────────────────────────────
 
 export async function runExpectancyQuery(params: QueryParams) {
-  const cacheKey = `expectancy_${JSON.stringify(params)}`;
+  const cacheKey = `expectancy_v2_${JSON.stringify(params)}`;
   const cached = getCached(cacheKey);
   if (cached) return cached;
 
@@ -252,32 +314,34 @@ export async function runExpectancyQuery(params: QueryParams) {
   }
 
   const { dates, opens, highs, lows, closes, volumes } = hist;
-  const MIN_LOOKBACK = 60; // need enough history for indicators
+  const MIN_LOOKBACK = 60;
 
   const matchedEvents: any[] = [];
 
   for (let i = MIN_LOOKBACK; i < closes.length - 5; i++) {
     if (!closes[i]) continue;
+    if (!evalGroup(params.group, i, closes, opens, highs, lows, volumes)) continue;
 
-    // All conditions must be true
-    const allMatch = params.conditions.every(cond =>
-      evaluateCondition(cond, i, closes, opens, highs, lows, volumes)
-    );
-
-    if (!allMatch) continue;
-
-    // Calculate forward returns
     const returns: Record<string, number | null> = {};
     for (const w of FORWARD_WINDOWS) {
       returns[w.label] = forwardReturn(closes, i, w.days);
     }
 
-    // Build a description of the trigger
-    const maxLookback = Math.max(...params.conditions.map(c => c.lookback ?? 1));
+    // Best-effort trigger % from the first price_change_pct leaf
     const triggerPct = (() => {
-      const priceCond = params.conditions.find(c => c.type === "price_change_pct");
-      if (!priceCond) return null;
-      const lb = priceCond.lookback ?? 5;
+      function findFirstPriceChange(node: Condition | ConditionGroup): Condition | null {
+        if ("logic" in node) {
+          for (const child of (node as ConditionGroup).conditions) {
+            const found = findFirstPriceChange(child);
+            if (found) return found;
+          }
+          return null;
+        }
+        return (node as Condition).type === "price_change_pct" ? (node as Condition) : null;
+      }
+      const pc = findFirstPriceChange(params.group);
+      if (!pc) return null;
+      const lb = pc.lookback ?? 5;
       const prev = closes[i - lb];
       if (!prev) return null;
       return ((closes[i] - prev) / prev) * 100;
@@ -294,7 +358,7 @@ export async function runExpectancyQuery(params: QueryParams) {
   if (matchedEvents.length === 0) {
     const result = {
       ticker: params.ticker,
-      label: params.label ?? buildLabel(params),
+      label: params.label ?? buildGroupLabel(params.ticker, params.group),
       events: [],
       summary: null,
       totalBars: closes.length,
@@ -304,43 +368,37 @@ export async function runExpectancyQuery(params: QueryParams) {
     return result;
   }
 
-  // ── Summary statistics ────────────────────────────────────────────────────
+  // Summary statistics
   const summary: Record<string, any> = {};
-  for (const w of FORWARD_WINDOWS.filter(x => x.days > 0)) {
+  for (const w of FORWARD_WINDOWS) {
     const vals = matchedEvents
       .map(e => e.returns[w.label])
       .filter((v): v is number => v !== null);
     if (vals.length === 0) { summary[w.label] = null; continue; }
-
     const wins = vals.filter(v => v > 0).length;
     const sorted = [...vals].sort((a, b) => a - b);
-    const median = sorted[Math.floor(sorted.length / 2)];
     const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-    const min = sorted[0];
-    const max = sorted[sorted.length - 1];
+    const median = sorted[Math.floor(sorted.length / 2)];
     const variance = vals.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / vals.length;
-    const std = Math.sqrt(variance);
-
     summary[w.label] = {
       winRate: Math.round((wins / vals.length) * 100),
       mean: Math.round(mean * 10) / 10,
       median: Math.round(median * 10) / 10,
-      min: Math.round(min * 10) / 10,
-      max: Math.round(max * 10) / 10,
-      std: Math.round(std * 10) / 10,
+      min: Math.round(sorted[0] * 10) / 10,
+      max: Math.round(sorted[sorted.length - 1] * 10) / 10,
+      std: Math.round(Math.sqrt(variance) * 10) / 10,
       n: vals.length,
     };
   }
 
-  // Plain-English summary
   const threeMonth = summary["3M"];
   const plainText = threeMonth
-    ? `When ${params.ticker} matched this pattern, the 3-month win rate was ${threeMonth.winRate}% with a mean return of ${threeMonth.mean > 0 ? "+" : ""}${threeMonth.mean}% across ${matchedEvents.length} events since ${dates[MIN_LOOKBACK]?.slice(0, 4)}.`
+    ? `When ${params.ticker} matched this pattern, the 3-month win rate was ${threeMonth.winRate}% with a mean return of ${threeMonth.mean > 0 ? "+" : ""}${threeMonth.mean}% across ${matchedEvents.length} events.`
     : `Found ${matchedEvents.length} historical matches for this pattern.`;
 
   const result = {
     ticker: params.ticker,
-    label: params.label ?? buildLabel(params),
+    label: params.label ?? buildGroupLabel(params.ticker, params.group),
     events: matchedEvents,
     summary,
     totalBars: closes.length,
@@ -352,132 +410,206 @@ export async function runExpectancyQuery(params: QueryParams) {
   return result;
 }
 
-// ── Natural language parser ───────────────────────────────────────────────────
-// Parses queries like:
-//   "QQQ up 8.5% in 6 days"
-//   "TSLA up 10% in 5 days and RSI above 70"
-//   "AMZN down 15% in 1 month"
-//   "SPY above 200dma"
-//   "NVDA gap up 5%"
-//   "AAPL near 52-week high"
+// ── Label builder ─────────────────────────────────────────────────────────────
+
+function conditionLabel(c: Condition): string {
+  switch (c.type) {
+    case "price_change_pct":
+      return `${c.direction === "down" ? "↓" : "↑"}${c.value}%+ in ${c.lookback}d`;
+    case "price_above_ma":
+      return `price ${c.direction} ${c.lookback}d SMA`;
+    case "price_extended_pct":
+      return `>${c.value}% ${c.direction} ${c.lookback}p ${c.useEMA !== false ? "EMA" : "SMA"}`;
+    case "rsi":
+      return `RSI ${c.direction} ${c.value}`;
+    case "bb_width":
+      return `BBW ${c.direction} ${c.value}`;
+    case "bb_position":
+      return `price ${c.direction} ${c.bbPeriod ?? 20}p BB`;
+    case "volume_surge":
+      return `vol ≥${c.value}× avg`;
+    case "gap_up":
+      return `gap up ${c.value}%+`;
+    case "near_52w_high":
+      return `near 52w high`;
+    case "near_52w_low":
+      return `near 52w low`;
+    default:
+      return "";
+  }
+}
+
+function groupLabel(g: ConditionGroup): string {
+  const parts = g.conditions.map(node =>
+    "logic" in node ? `(${groupLabel(node as ConditionGroup)})` : conditionLabel(node as Condition)
+  );
+  return parts.join(` ${g.logic} `);
+}
+
+function buildGroupLabel(ticker: string, g: ConditionGroup): string {
+  return `${ticker}: ${groupLabel(g)}`;
+}
+
+// ── NLP parser → structured ConditionGroup ────────────────────────────────────
+//
+// Strategy: parse the input into a flat list of Condition objects, then wrap
+// them in a ConditionGroup.  The logic (AND/OR) is inferred from the connector
+// words: "and" → AND, "or" → OR.  Mixed logic defaults to AND.
+//
+// The key architectural improvement: parsing is two-phase:
+//   Phase 1: Normalize + tokenize into segments (split on "and"/"or")
+//   Phase 2: For each segment, run focused pattern matchers → Condition
+//   Phase 3: Wrap into ConditionGroup with the inferred logic
 
 export function parseNaturalQuery(query: string): QueryParams | null {
-  // Normalize synonyms before parsing
-  const q = query.trim().toLowerCase()
+  // ── Phase 1: Normalize ────────────────────────────────────────────────────
+  const raw = query.trim();
+  const q = raw.toLowerCase()
     .replace(/trading sessions?/g, "days")
-    .replace(/sessions?/g, "days")
+    .replace(/\bsessions?\b/g, "days")
     .replace(/\bweeks?\b/g, "week")
     .replace(/\bmonths?\b/g, "month")
+    // "RSI at X" → "RSI above X-2" (RSI at 70 means overbought, roughly above 68)
     .replace(/rsi\s*(?:at|=|is|of)\s*([\d.]+)/g, (_, n) => `rsi above ${parseFloat(n) - 2}`)
-    .replace(/rsi\s*(?:around|near|~)\s*([\d.]+)/g, (_, n) => `rsi above ${parseFloat(n) - 3}`);
+    .replace(/rsi\s*(?:around|near|~)\s*([\d.]+)/g, (_, n) => `rsi above ${parseFloat(n) - 3}`)
+    // ">70" → "above 70" for RSI shorthand
+    .replace(/rsi\s*>\s*([\d.]+)/g, (_, n) => `rsi above ${n}`)
+    .replace(/rsi\s*<\s*([\d.]+)/g, (_, n) => `rsi below ${n}`);
 
-  // Extract ticker — first word that's all caps (or we uppercase first token)
-  const tickerMatch = query.match(/^([A-Za-z]{1,5})\b/);
+  // ── Extract ticker (first word) ───────────────────────────────────────────
+  const tickerMatch = raw.match(/^([A-Za-z]{1,5})\b/);
   if (!tickerMatch) return null;
   const ticker = tickerMatch[1].toUpperCase();
 
+  // ── Detect logic operator ──────────────────────────────────────────────────
+  const hasOr = /\bor\b/.test(q);
+  const hasAnd = /\band\b|,/.test(q);
+  const logic: Logic = (hasOr && !hasAnd) ? "OR" : "AND";
+
+  // ── Phase 2: Segment → Condition matchers ─────────────────────────────────
+  // Split on "and", "or", and commas to get individual clause strings
+  const segments = q.split(/\band\b|\bor\b|,/).map(s => s.trim()).filter(Boolean);
+
   const conditions: Condition[] = [];
 
-  // "up X% in Y days/weeks/months"
-  const priceUpMatch = q.match(/up\s+([\d.]+)\s*%\s*(?:in|over)\s+([\d.]+)\s*(day|week|month)/);
-  if (priceUpMatch) {
-    const pct = parseFloat(priceUpMatch[1]);
-    const num = parseFloat(priceUpMatch[2]);
-    const unit = priceUpMatch[3];
-    const days = unit.startsWith("week") ? num * 5 : unit.startsWith("month") ? num * 21 : num;
-    conditions.push({ type: "price_change_pct", direction: "up", value: pct, lookback: Math.round(days) });
-  }
+  for (const seg of segments) {
 
-  // "down X% in Y days/weeks/months"
-  const priceDownMatch = q.match(/down\s+([\d.]+)\s*%\s*(?:in|over)\s+([\d.]+)\s*(day|week|month)/);
-  if (priceDownMatch) {
-    const pct = parseFloat(priceDownMatch[1]);
-    const num = parseFloat(priceDownMatch[2]);
-    const unit = priceDownMatch[3];
-    const days = unit.startsWith("week") ? num * 5 : unit.startsWith("month") ? num * 21 : num;
-    conditions.push({ type: "price_change_pct", direction: "down", value: pct, lookback: Math.round(days) });
-  }
-
-  // "RSI above/below X"
-  const rsiMatch = q.match(/rsi\s*(above|below|over|under)\s*([\d.]+)/);
-  if (rsiMatch) {
-    const dir = rsiMatch[1].startsWith("above") || rsiMatch[1] === "over" ? "above" : "below";
-    conditions.push({ type: "rsi", direction: dir, value: parseFloat(rsiMatch[2]) });
-  }
-
-  // "price >X% extended above/below Y EMA/SMA" — must come BEFORE the simple MA match
-  // Handles: "price >10% extended above 20 EMA", "extended 10% above 20 EMA",
-  //           ">10% above 20ema", "10% extended above 20-day EMA", ">X% above YEMA"
-  const extendedMatch = q.match(
-    /(?:price\s*)?[>≥]?\s*([\d.]+)\s*%?\s*(?:extended\s+)?(above|below)\s+([\d]+)[\s-]*(?:day|d)?[\s-]*(?:period)?[\s-]*(ema|sma)/
-  ) || q.match(
-    /(?:extended|ext)\s+([\d.]+)\s*%\s*(above|below)\s+([\d]+)[\s-]*(?:day|d)?[\s-]*(ema|sma)/
-  ) || q.match(
-    /price\s+(?:is\s+)?(?:more\s+than\s+)?([\d.]+)\s*%\s*(above|below)\s+(?:the\s+)?([\d]+)[\s-]*(?:day|d)?[\s-]*(ema|sma)/
-  );
-  if (extendedMatch) {
-    const pct = parseFloat(extendedMatch[1]);
-    const dir = extendedMatch[2] as "above" | "below";
-    const period = parseInt(extendedMatch[3]);
-    const useEMA = extendedMatch[4] === "ema";
-    conditions.push({ type: "price_extended_pct", direction: dir, value: pct, lookback: period, useEMA });
-  } else {
-    // "above/below Xdma" or "above X-day MA" — simple price-above-MA (no extension %)
-    const maMatch = q.match(/(above|below)\s+([\d]+)[\s-]*(?:d|day|-)?\s*(?:ma|sma|dma)/) ||
-                    q.match(/(above|below)\s+([\d]+)[\s-]*(?:d|day|-)?\s*(ema)(?!\s*[\d])/);
-    if (maMatch) {
-      const dir = maMatch[1] as "above" | "below";
-      conditions.push({ type: "price_above_ma", direction: dir, value: 0, lookback: parseInt(maMatch[2]) });
+    // ── Price Change: "up X% in Y days/weeks/months"
+    const priceUp = seg.match(/up\s+([\d.]+)\s*%\s*(?:in|over)\s+([\d.]+)\s*(day|week|month)/);
+    if (priceUp) {
+      const pct = parseFloat(priceUp[1]);
+      const num = parseFloat(priceUp[2]);
+      const unit = priceUp[3];
+      const days = unit.startsWith("week") ? num * 5 : unit.startsWith("month") ? num * 21 : num;
+      conditions.push({ type: "price_change_pct", direction: "up", value: pct, lookback: Math.round(days) });
+      continue;
     }
-  }
 
-  // "gap up X%"
-  const gapMatch = q.match(/gap\s*up\s*([\d.]+)\s*%/);
-  if (gapMatch) {
-    conditions.push({ type: "gap_up", value: parseFloat(gapMatch[1]) });
-  }
+    const priceDown = seg.match(/down\s+([\d.]+)\s*%\s*(?:in|over)\s+([\d.]+)\s*(day|week|month)/);
+    if (priceDown) {
+      const pct = parseFloat(priceDown[1]);
+      const num = parseFloat(priceDown[2]);
+      const unit = priceDown[3];
+      const days = unit.startsWith("week") ? num * 5 : unit.startsWith("month") ? num * 21 : num;
+      conditions.push({ type: "price_change_pct", direction: "down", value: pct, lookback: Math.round(days) });
+      continue;
+    }
 
-  // "volume X× above average" or "vol surge X"
-  const volMatch = q.match(/vol(?:ume)?\s*(?:surge|spike|above|×)?\s*([\d.]+)\s*[×x]/);
-  if (volMatch) {
-    conditions.push({ type: "volume_surge", value: parseFloat(volMatch[1]) });
-  }
+    // ── RSI
+    const rsi = seg.match(/rsi\s*(above|below|over|under)\s*([\d.]+)/);
+    if (rsi) {
+      const dir = rsi[1] === "above" || rsi[1] === "over" ? "above" : "below";
+      conditions.push({ type: "rsi", direction: dir, value: parseFloat(rsi[2]) });
+      continue;
+    }
 
-  // "near 52-week high" / "near 52w high"
-  if (q.match(/near\s*52.?w(?:eek)?\s*high/)) {
-    conditions.push({ type: "near_52w_high", value: 5 });
-  }
-  if (q.match(/near\s*52.?w(?:eek)?\s*low/)) {
-    conditions.push({ type: "near_52w_low", value: 5 });
+    // ── EMA/SMA Extension: "price >X% extended above Y EMA"
+    // Handles: ">10% above 20 EMA", "price >10% extended above 20 EMA",
+    //          "10% extended above 20-day EMA", "price is 10% above the 20 EMA"
+    const extMatch =
+      seg.match(/(?:price\s*)?[>≥]?\s*([\d.]+)\s*%?\s*(?:extended\s+)?(above|below)\s+([\d]+)[\s-]*(?:day|d)?[\s-]*(?:period)?[\s-]*(ema|sma)/) ||
+      seg.match(/(?:extended|ext)\s+([\d.]+)\s*%\s*(above|below)\s+([\d]+)[\s-]*(?:day|d)?[\s-]*(ema|sma)/) ||
+      seg.match(/price\s+(?:is\s+)?(?:more\s+than\s+)?([\d.]+)\s*%\s*(above|below)\s+(?:the\s+)?([\d]+)[\s-]*(?:day|d)?[\s-]*(ema|sma)/);
+    if (extMatch) {
+      conditions.push({
+        type: "price_extended_pct",
+        direction: extMatch[2] as "above" | "below",
+        value: parseFloat(extMatch[1]),
+        lookback: parseInt(extMatch[3]),
+        useEMA: extMatch[4] === "ema",
+      });
+      continue;
+    }
+
+    // ── Simple price above/below SMA (no extension %): "above 200dma", "above 50-day MA"
+    const maMatch =
+      seg.match(/(above|below)\s+([\d]+)[\s-]*(?:d|day)?[\s-]*(?:ma|sma|dma)/) ||
+      seg.match(/(above|below)\s+([\d]+)[\s-]*(?:d|day)?[\s-]*(ema)(?!\s*[\d])/);
+    if (maMatch) {
+      conditions.push({
+        type: "price_above_ma",
+        direction: maMatch[1] as "above" | "below",
+        value: 0,
+        lookback: parseInt(maMatch[2]),
+      });
+      continue;
+    }
+
+    // ── Bollinger Band Width: "BB width above 0.1", "BBW > 0.15"
+    const bbwMatch =
+      seg.match(/(?:bb(?:and)?(?:\s*width)?|bbw)\s*(?:above|>|≥|expanded?)\s*([\d.]+)/) ||
+      seg.match(/(?:bb(?:and)?(?:\s*width)?|bbw)\s*(?:below|<|≤|contracted?)\s*([\d.]+)/);
+    if (bbwMatch) {
+      const isAbove = /above|>|expanded/.test(seg);
+      conditions.push({
+        type: "bb_width",
+        direction: isAbove ? "above" : "below",
+        value: parseFloat(bbwMatch[1]),
+      });
+      continue;
+    }
+
+    // ── Bollinger Band position: "price above upper BB", "price below lower band"
+    const bbPosMatch =
+      seg.match(/price\s*(above|below)\s*(?:upper|lower)?\s*(?:bb|bollinger|band)/) ||
+      seg.match(/(above|below)\s*(?:upper|lower)\s*(?:bb|band)/);
+    if (bbPosMatch) {
+      const rawDir = bbPosMatch[1];
+      // "price above upper BB" → above; "price below lower BB" → below
+      // Also handle "above lower BB" as below, etc.
+      const lowerMentioned = /lower/.test(seg);
+      const dir: "above" | "below" = lowerMentioned ? "below" : (rawDir === "above" ? "above" : "below");
+      conditions.push({ type: "bb_position", direction: dir, value: 0 });
+      continue;
+    }
+
+    // ── Gap up
+    const gapMatch = seg.match(/gap\s*up\s*([\d.]+)\s*%/);
+    if (gapMatch) {
+      conditions.push({ type: "gap_up", value: parseFloat(gapMatch[1]) });
+      continue;
+    }
+
+    // ── Volume surge
+    const volMatch = seg.match(/vol(?:ume)?\s*(?:surge|spike|above|×|x)?\s*([\d.]+)\s*[×x]/);
+    if (volMatch) {
+      conditions.push({ type: "volume_surge", value: parseFloat(volMatch[1]) });
+      continue;
+    }
+
+    // ── 52-week high/low
+    if (/near\s*52.?w(?:eek)?\s*high/.test(seg)) {
+      conditions.push({ type: "near_52w_high", value: 5 });
+      continue;
+    }
+    if (/near\s*52.?w(?:eek)?\s*low/.test(seg)) {
+      conditions.push({ type: "near_52w_low", value: 5 });
+      continue;
+    }
   }
 
   if (conditions.length === 0) return null;
 
-  return { ticker, conditions, label: buildLabel({ ticker, conditions }) };
-}
-
-function buildLabel(params: QueryParams): string {
-  const parts = params.conditions.map(c => {
-    switch (c.type) {
-      case "price_change_pct":
-        return `${c.direction === "down" ? "down" : "up"} ${c.value}%+ in ${c.lookback}d`;
-      case "price_above_ma":
-        return `${c.direction} ${c.lookback}dma`;
-      case "price_extended_pct":
-        return `price >${c.value}% ${c.direction} ${c.lookback}-period ${c.useEMA !== false ? "EMA" : "SMA"}`;
-      case "rsi":
-        return `RSI ${c.direction} ${c.value}`;
-      case "volume_surge":
-        return `vol ${c.value}× avg`;
-      case "gap_up":
-        return `gap up ${c.value}%+`;
-      case "near_52w_high":
-        return `near 52w high`;
-      case "near_52w_low":
-        return `near 52w low`;
-      default:
-        return "";
-    }
-  });
-  return `${params.ticker} ${parts.join(" + ")}`;
+  const group: ConditionGroup = { logic, conditions };
+  return { ticker, group, label: buildGroupLabel(ticker, group) };
 }
