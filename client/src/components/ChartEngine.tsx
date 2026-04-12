@@ -1,14 +1,15 @@
 /**
  * ChartEngine.tsx — Plotly-powered CMT-style dual-pane charts
- * Visual target: macrocharts.com — price (top, ~35%), indicator (bottom, ~65%), shared x-axis
- * Backend routes unchanged — only frontend rendering replaced.
+ * Visual target: macrocharts.com — indicator fills full pane by default,
+ * price pane collapsed (toggleable), shared x-axis when open.
+ * Global ticker bar: persistent text input at top, Enter updates all ticker-based charts.
  */
 import { useState, useCallback, useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Plot from "react-plotly.js";
 import {
   ChevronDown, ChevronRight, RefreshCw,
-  BarChart2, Activity, TrendingUp, Globe, Layers,
+  BarChart2, Activity, TrendingUp, Globe, Layers, ChevronUp,
 } from "lucide-react";
 
 // ─── API Base ─────────────────────────────────────────────────────────────────
@@ -152,19 +153,22 @@ const CATEGORIES = [
 ];
 
 // ─── Build Plotly figure from data + chart def ────────────────────────────────
+// showPrice: false = indicator fills full height (default)
+// showPrice: true  = indicator top 65%, price bottom 35%
 function buildFigure(
   def: ChartDef,
   indData: any,
   priceData: any[] | null,
   tf: TF,
   activeTicker: string,
+  showPrice: boolean,
 ): { data: Plotly.Data[]; layout: Partial<Plotly.Layout> } | null {
 
   if (!indData) return null;
 
-  const hasPricePane = !!def.priceTicker && !!priceData?.length;
+  const hasPricePane = showPrice && !!def.priceTicker && !!priceData?.length;
 
-  // ── Sector Rotation scatter (special case — no price pane) ────────────────
+  // ── Sector Rotation scatter (special case — no price pane ever) ────────────
   if (def.id === "3E") {
     if (!Array.isArray(indData) || !indData.length) return null;
     const colors = indData.map((d: any) => {
@@ -199,7 +203,7 @@ function buildFigure(
     };
   }
 
-  // ── SPY Volume (special: price on top, histogram on bottom) ──────────────
+  // ── SPY Volume (special: keep as-is — price on top, histogram below) ──────
   if (def.id === "4C") {
     if (!Array.isArray(indData) || !indData.length) return null;
     const d = filterDates(indData, tf);
@@ -207,7 +211,7 @@ function buildFigure(
     const closes = d.map((r: any) => r.close);
     const vols = d.map((r: any) => r.volume);
     const avg20 = d.map((r: any) => r.avgVol20);
-    const volColors = d.map((r: any, i: number) =>
+    const volColors = d.map((r: any) =>
       (r.avgVol20 != null && r.volume > r.avgVol20) ? RED + "cc" : BLUE + "55"
     );
 
@@ -246,7 +250,7 @@ function buildFigure(
     };
   }
 
-  // ── Fed Balance Sheet (no price pane, overlay on same chart) ────────────
+  // ── Fed Balance Sheet (no price pane, overlay on same chart — keep as-is) ──
   if (def.id === "3D") {
     if (!Array.isArray(indData) || !indData.length) return null;
     const d = filterDates(indData, tf);
@@ -283,7 +287,13 @@ function buildFigure(
   }
 
   // ── Standard dual-pane charts ────────────────────────────────────────────
-  // Build price trace (top pane, y1)
+  // Pane geometry:
+  //   Default (showPrice=false): indicator y2 fills [0, 1], no price pane
+  //   Toggle open (showPrice=true): indicator y2 = [0.37, 1.0], price y1 = [0.0, 0.33]
+  const indDomain: [number, number] = hasPricePane ? [0.37, 1.0] : [0.0, 1.0];
+  const priceDomain: [number, number] = [0.0, 0.33];
+
+  // Build price trace (bottom pane, y1) — only when showPrice=true
   const priceDates: string[] = [];
   const priceClose: number[] = [];
   if (hasPricePane && priceData) {
@@ -292,10 +302,14 @@ function buildFigure(
   }
 
   const traces: Plotly.Data[] = [];
-  const shapes: Partial<Plotly.Shape>[] = [
-    // Divider between top/bottom pane
-    { type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: 0.36, y1: 0.36, line: { color: GRID, width: 1 } } as any,
-  ];
+  const shapes: Partial<Plotly.Shape>[] = [];
+
+  // Divider line between panes — only when price pane is visible
+  if (hasPricePane) {
+    shapes.push(
+      { type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: 0.35, y1: 0.35, line: { color: GRID, width: 1 } } as any,
+    );
+  }
 
   if (hasPricePane) {
     traces.push({
@@ -308,7 +322,7 @@ function buildFigure(
     } as any);
   }
 
-  // ── Build indicator traces (bottom pane, y2) ──────────────────────────────
+  // ── Build indicator traces (y2) ────────────────────────────────────────────
   const iref = "y2";
 
   const addLine = (x: string[], y: (number|null)[], name: string, color: string, width = 2.5, dash?: string) => {
@@ -566,16 +580,16 @@ function buildFigure(
     ...baseLayout(),
     margin: { l: 52, r: 60, t: 8, b: 40 },
     shapes: shapes as any,
-    // top pane: y1 occupies 38–100%, bottom pane: y2 occupies 0–35%
     ...(hasPricePane ? {
+      // Toggle open: indicator top 65%, price bottom 35%
       yaxis: {
         ...axisStyle(),
-        domain: [0.38, 1.0],
+        domain: priceDomain,
         title: { text: activeTicker, font: { size: 9, color: AXIS_CLR, family: FONT } },
       },
       yaxis2: {
         ...axisStyle(),
-        domain: [0.0, 0.34],
+        domain: indDomain,
       },
       xaxis: {
         ...axisStyle(),
@@ -583,9 +597,12 @@ function buildFigure(
         matches: "x",
       },
     } : {
-      // No price pane — full height for indicator
-      yaxis2: { ...axisStyle() },
-      xaxis:  { ...axisStyle(), anchor: "y2" },
+      // Default: indicator fills full height
+      yaxis2: {
+        ...axisStyle(),
+        domain: indDomain,
+      },
+      xaxis: { ...axisStyle(), anchor: "y2" },
     }),
   } as any;
 
@@ -593,10 +610,13 @@ function buildFigure(
 }
 
 // ─── ChartPanel component ─────────────────────────────────────────────────────
-function ChartPanel({ def, tf }: { def: ChartDef; tf: TF }) {
-  const [activeTicker, setActiveTicker] = useState(def.defaultTicker ?? "SPY");
+// globalTicker: lifted from ChartEngine parent — drives per-ticker endpoints + price overlay label
+// showPrice: local toggle state per panel
+function ChartPanel({ def, tf, globalTicker }: { def: ChartDef; tf: TF; globalTicker: string }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [dims, setDims] = useState({ width: 800, height: 600 });
+  // Price pane collapsed by default
+  const [showPrice, setShowPrice] = useState(false);
 
   // Track container size via ResizeObserver
   useEffect(() => {
@@ -611,16 +631,23 @@ function ChartPanel({ def, tf }: { def: ChartDef; tf: TF }) {
     return () => ro.disconnect();
   }, []);
 
+  // Derive active ticker for endpoint routing:
+  // Charts 4A/4B/4D/4E: use globalTicker
+  // All others: their endpoint is fixed, globalTicker only affects price overlay label
+  const activeTicker = (def.id === "4A" || def.id === "4B" || def.id === "4D" || def.id === "4E")
+    ? globalTicker
+    : (def.defaultTicker ?? "SPY");
+
   const endpoint = useCallback(() => {
-    if (def.id === "4A") return `/api/charts/tpo/${activeTicker}`;
-    if (def.id === "4B") return `/api/charts/dsi/${activeTicker}`;
-    if (def.id === "4D") return `/api/charts/atr-ext/${activeTicker}`;
-    if (def.id === "4E") return `/api/charts/ratio/${activeTicker}/SPY`;
+    if (def.id === "4A") return `/api/charts/tpo/${globalTicker}`;
+    if (def.id === "4B") return `/api/charts/dsi/${globalTicker}`;
+    if (def.id === "4D") return `/api/charts/atr-ext/${globalTicker}`;
+    if (def.id === "4E") return `/api/charts/ratio/${globalTicker}/SPY`;
     return def.endpoint;
-  }, [def.id, def.endpoint, activeTicker]);
+  }, [def.id, def.endpoint, globalTicker]);
 
   const priceTicker = (def.id === "4A" || def.id === "4B" || def.id === "4D" || def.id === "4E")
-    ? activeTicker
+    ? globalTicker
     : (def.priceTicker ?? "SPY");
 
   const { data: indData, isLoading, isError, error, refetch } = useQuery({
@@ -658,12 +685,17 @@ function ChartPanel({ def, tf }: { def: ChartDef; tf: TF }) {
   });
 
   const figure = (!isLoading && !isError && indData)
-    ? buildFigure(def, indData, priceData ?? null, tf, activeTicker)
+    ? buildFigure(def, indData, priceData ?? null, tf, activeTicker, showPrice)
     : null;
 
   const isEmpty = figure && (
     Array.isArray(indData) && indData.length === 0
   );
+
+  // Whether this chart can show a price toggle at all
+  // 3D and 3E have no priceTicker — no toggle
+  // 4C is special-cased (own layout) — no toggle
+  const canTogglePrice = !!def.priceTicker && def.id !== "4C" && def.id !== "3D" && def.id !== "3E";
 
   return (
     <div style={{
@@ -689,14 +721,24 @@ function ChartPanel({ def, tf }: { def: ChartDef; tf: TF }) {
         <span style={{ fontSize: 12, color: "#e2e8f0", fontFamily: FONT, fontWeight: 600 }}>{def.label}</span>
         <span style={{ fontSize: 10, color: AXIS_CLR, fontFamily: FONT, flex: 1 }}>{def.desc}</span>
 
-        {def.tickers && (
-          <select
-            value={activeTicker}
-            onChange={e => setActiveTicker(e.target.value)}
-            style={{ background: BG, border: "1px solid #132035", color: "#94a3b8", fontFamily: FONT, fontSize: 10, padding: "2px 6px", borderRadius: 2 }}
+        {/* Price pane toggle — only for charts that support it */}
+        {canTogglePrice && (
+          <button
+            onClick={() => setShowPrice(p => !p)}
+            title={showPrice ? "Hide price pane" : "Show price pane"}
+            style={{
+              display: "flex", alignItems: "center", gap: 3,
+              background: showPrice ? `${PRICE_CLR}15` : "none",
+              border: `1px solid ${showPrice ? PRICE_CLR + "44" : "#132035"}`,
+              color: showPrice ? PRICE_CLR : AXIS_CLR,
+              fontFamily: FONT, fontSize: 9,
+              padding: "2px 7px", cursor: "pointer", borderRadius: 2,
+              letterSpacing: "0.05em",
+            }}
           >
-            {def.tickers.map(t => <option key={t} value={t}>{t}</option>)}
-          </select>
+            {showPrice ? <ChevronUp size={9} /> : <ChevronDown size={9} />}
+            PRICE
+          </button>
         )}
 
         <button onClick={() => refetch()} title="Refresh"
@@ -819,6 +861,16 @@ export default function ChartEngine() {
   const [tf, setTF] = useState<TF>("2Y");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
 
+  // Global ticker state — drives all per-ticker chart endpoints + price overlay label
+  const [globalTicker, setGlobalTicker] = useState("SPY");
+  const [tickerInput, setTickerInput] = useState("SPY");
+  const tickerInputRef = useRef<HTMLInputElement>(null);
+
+  const commitTicker = () => {
+    const t = tickerInput.trim().toUpperCase();
+    if (t) setGlobalTicker(t);
+  };
+
   const activeDef = CHARTS.find(c => c.id === selected) ?? CHARTS[0];
   const activeCat = CATEGORIES.find(c => c.id === activeDef.category);
 
@@ -826,37 +878,94 @@ export default function ChartEngine() {
     <div style={{
       display: "flex", width: "100%", height: "100%",
       background: BG, overflow: "hidden",
+      flexDirection: "column",
     }}>
-      <Sidebar selected={selected} onSelect={setSelected} collapsed={collapsed} setCollapsed={setCollapsed} />
 
-      {/* Right side: topbar + chart fills all remaining space */}
-      <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
-        {/* Top bar */}
-        <div style={{
-          display: "flex", alignItems: "center", gap: 10, padding: "7px 14px",
-          borderBottom: "1px solid #132035", background: "#07101d", flexShrink: 0,
-        }}>
-          <Layers size={13} color={activeCat?.color ?? ACCENT} />
-          <span style={{ fontFamily: FONT, fontSize: 12, color: "#e2e8f0", fontWeight: 600 }}>{activeDef.label}</span>
-          <span style={{ fontFamily: FONT, fontSize: 10, color: AXIS_CLR, flex: 1 }}>{activeDef.desc}</span>
-
-          <div style={{ display: "flex", gap: 4 }}>
-            {(["1Y","2Y","5Y","10Y"] as TF[]).map(t => (
-              <button key={t} onClick={() => setTF(t)} style={{
-                background: tf === t ? `${BLUE}22` : "none",
-                border: `1px solid ${tf === t ? BLUE : "#132035"}`,
-                color: tf === t ? BLUE : AXIS_CLR,
-                fontFamily: FONT, fontSize: 10,
-                padding: "3px 8px", cursor: "pointer", borderRadius: 2,
-              }}>{t}</button>
-            ))}
-          </div>
+      {/* ── Persistent Ticker Control Bar — sits directly below tab nav ─────── */}
+      <div style={{
+        display: "flex", alignItems: "center", gap: 10,
+        padding: "6px 14px",
+        borderBottom: "1px solid #132035",
+        background: "#04080f",
+        flexShrink: 0,
+      }}>
+        <span style={{ fontFamily: FONT, fontSize: 9, color: AXIS_CLR, letterSpacing: "0.12em", whiteSpace: "nowrap" }}>
+          TICKER
+        </span>
+        <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+          <input
+            ref={tickerInputRef}
+            value={tickerInput}
+            onChange={e => setTickerInput(e.target.value.toUpperCase())}
+            onKeyDown={e => { if (e.key === "Enter") commitTicker(); }}
+            onBlur={commitTicker}
+            placeholder="SPY"
+            style={{
+              background: "#07101d",
+              border: `1px solid ${tickerInput.trim().toUpperCase() !== globalTicker ? AMBER + "88" : "#1a2d47"}`,
+              color: "#e2e8f0",
+              fontFamily: FONT,
+              fontSize: 13,
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              padding: "4px 10px",
+              width: 90,
+              borderRadius: 3,
+              outline: "none",
+              textTransform: "uppercase",
+            }}
+          />
         </div>
+        {/* Active ticker badge */}
+        <div style={{
+          display: "flex", alignItems: "center", gap: 5,
+          background: `${ACCENT}18`,
+          border: `1px solid ${ACCENT}44`,
+          borderRadius: 3, padding: "3px 8px",
+        }}>
+          <div style={{ width: 5, height: 5, borderRadius: "50%", background: ACCENT }} />
+          <span style={{ fontFamily: FONT, fontSize: 11, color: ACCENT, fontWeight: 700, letterSpacing: "0.08em" }}>
+            {globalTicker}
+          </span>
+        </div>
+        <span style={{ fontFamily: FONT, fontSize: 9, color: AXIS_CLR }}>
+          ↵ Enter to apply
+        </span>
+      </div>
 
-        {/* Chart — takes ALL remaining height */}
-        <div style={{ flex: 1, padding: 12, overflow: "hidden", minHeight: 0, display: "flex" }}>
-          <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
-            <ChartPanel key={`${selected}-${tf}`} def={activeDef} tf={tf} />
+      {/* ── Main content: sidebar + chart area ─────────────────────────────── */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden", minHeight: 0 }}>
+        <Sidebar selected={selected} onSelect={setSelected} collapsed={collapsed} setCollapsed={setCollapsed} />
+
+        {/* Right side: topbar + chart fills all remaining space */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minWidth: 0 }}>
+          {/* Top bar */}
+          <div style={{
+            display: "flex", alignItems: "center", gap: 10, padding: "7px 14px",
+            borderBottom: "1px solid #132035", background: "#07101d", flexShrink: 0,
+          }}>
+            <Layers size={13} color={activeCat?.color ?? ACCENT} />
+            <span style={{ fontFamily: FONT, fontSize: 12, color: "#e2e8f0", fontWeight: 600 }}>{activeDef.label}</span>
+            <span style={{ fontFamily: FONT, fontSize: 10, color: AXIS_CLR, flex: 1 }}>{activeDef.desc}</span>
+
+            <div style={{ display: "flex", gap: 4 }}>
+              {(["1Y","2Y","5Y","10Y"] as TF[]).map(t => (
+                <button key={t} onClick={() => setTF(t)} style={{
+                  background: tf === t ? `${BLUE}22` : "none",
+                  border: `1px solid ${tf === t ? BLUE : "#132035"}`,
+                  color: tf === t ? BLUE : AXIS_CLR,
+                  fontFamily: FONT, fontSize: 10,
+                  padding: "3px 8px", cursor: "pointer", borderRadius: 2,
+                }}>{t}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Chart — takes ALL remaining height */}
+          <div style={{ flex: 1, padding: 12, overflow: "hidden", minHeight: 0, display: "flex" }}>
+            <div style={{ flex: 1, minWidth: 0, minHeight: 0 }}>
+              <ChartPanel key={`${selected}-${tf}-${globalTicker}`} def={activeDef} tf={tf} globalTicker={globalTicker} />
+            </div>
           </div>
         </div>
       </div>
