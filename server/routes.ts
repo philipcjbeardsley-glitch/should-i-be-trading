@@ -4,6 +4,7 @@ import { fetchAllMarketData } from "./marketData";
 import { fetchMacroIntelligence } from "./macroData";
 import { fetchThemeTrackerData, fetchSectorSnapshot, fetchCOTData } from "./themeData";
 import { fetchBreadthData, fetchSetupsData } from "./breadthData";
+import { runExpectancyQuery, parseNaturalQuery } from "./expectancyData";
 
 let cachedDashboard: any = null;
 let lastFetch = 0;
@@ -138,6 +139,32 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     } catch (err: any) {
       console.error("Setups error:", err?.message);
       res.status(500).json({ error: "Failed to fetch setups data", detail: err?.message });
+    }
+  });
+
+
+  // Historical Expectancy
+  app.post("/api/expectancy", async (req, res) => {
+    try {
+      const { query, ticker, conditions, label } = req.body;
+      let params: any = null;
+
+      if (query && typeof query === "string") {
+        params = parseNaturalQuery(query);
+        if (!params) {
+          return res.status(400).json({ error: "Could not parse query. Try: 'TSLA up 10% in 5 days' or 'QQQ up 8% in 6 days and RSI above 65'" });
+        }
+      } else if (ticker && conditions) {
+        params = { ticker, conditions, label };
+      } else {
+        return res.status(400).json({ error: "Provide either a natural language 'query' string or 'ticker' + 'conditions' array" });
+      }
+
+      const result = await runExpectancyQuery(params);
+      res.json(result);
+    } catch (err: any) {
+      console.error("Expectancy error:", err?.message);
+      res.status(500).json({ error: "Query failed", detail: err?.message });
     }
   });
 

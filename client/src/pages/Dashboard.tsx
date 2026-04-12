@@ -6,6 +6,7 @@ import MacroIntelligence from "@/components/MacroIntelligence";
 import ThemeTracker from "@/components/ThemeTracker";
 import BreadthTab from "@/components/BreadthTab";
 import SetupsTab from "@/components/SetupsTab";
+import HistoricalExpectancy from "@/components/HistoricalExpectancy";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 interface SectorData {
@@ -26,7 +27,7 @@ interface DashboardData {
   cached?: boolean;
 }
 
-type MainTab = "pulse" | "macro" | "themes" | "breadth" | "setups";
+type MainTab = "pulse" | "macro" | "themes" | "breadth" | "setups" | "expectancy";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const SECTOR_NAMES: Record<string, string> = {
@@ -237,6 +238,7 @@ const TABS: { key: MainTab; label: string; icon: React.ReactNode }[] = [
   { key: "themes", label: "Theme Tracker", icon: <LineChart size={12} /> },
   { key: "breadth", label: "Breadth", icon: <Grid3x3 size={12} /> },
   { key: "setups", label: "Setups", icon: <Crosshair size={12} /> },
+  { key: "expectancy", label: "Hist. Expectancy", icon: <BarChart2 size={12} /> },
 ];
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
@@ -590,6 +592,9 @@ export default function Dashboard() {
 
         {/* Setups tab */}
         {activeTab === "setups" && <SetupsTab />}
+
+        {/* Historical Expectancy tab */}
+        {activeTab === "expectancy" && <HistoricalExpectancy />}
       </div>
 
       {/* ── Footer ── */}
