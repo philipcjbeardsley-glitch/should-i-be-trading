@@ -7,6 +7,7 @@ import ThemeTracker from "@/components/ThemeTracker";
 import BreadthTab from "@/components/BreadthTab";
 import SetupsTab from "@/components/SetupsTab";
 import HistoricalExpectancy from "@/components/HistoricalExpectancy";
+import ChartEngine from "@/components/ChartEngine";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 interface SectorData {
@@ -27,7 +28,7 @@ interface DashboardData {
   cached?: boolean;
 }
 
-type MainTab = "pulse" | "macro" | "themes" | "breadth" | "setups" | "expectancy";
+type MainTab = "pulse" | "macro" | "themes" | "breadth" | "setups" | "expectancy" | "charts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const SECTOR_NAMES: Record<string, string> = {
@@ -239,6 +240,7 @@ const TABS: { key: MainTab; label: string; icon: React.ReactNode }[] = [
   { key: "breadth", label: "Breadth", icon: <Grid3x3 size={12} /> },
   { key: "setups", label: "Setups", icon: <Crosshair size={12} /> },
   { key: "expectancy", label: "Hist. Expectancy", icon: <BarChart2 size={12} /> },
+  { key: "charts", label: "Chart Engine", icon: <Layers size={12} /> },
 ];
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
@@ -595,6 +597,13 @@ export default function Dashboard() {
 
         {/* Historical Expectancy tab */}
         {activeTab === "expectancy" && <HistoricalExpectancy />}
+
+        {/* Chart Engine tab */}
+        {activeTab === "charts" && (
+          <div style={{ flex: 1, overflow: "hidden", display: "flex", minHeight: 0 }}>
+            <ChartEngine />
+          </div>
+        )}
       </div>
 
       {/* ── Footer ── */}

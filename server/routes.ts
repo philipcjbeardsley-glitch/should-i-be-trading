@@ -5,6 +5,12 @@ import { fetchMacroIntelligence } from "./macroData";
 import { fetchThemeTrackerData, fetchSectorSnapshot, fetchCOTData } from "./themeData";
 import { fetchBreadthData, fetchSetupsData } from "./breadthData";
 import { runExpectancyQuery, parseNaturalQuery } from "./expectancyData";
+import {
+  getBreadthData, getMacroData, getLiquidityComposite, getYieldCurve,
+  getCreditSpreads, getFedBalanceSheet, getSectorRotation, getRatioData,
+  getCOTData as getChartCOTData, getCTAModel, getTrendPower, getDSI, getATRExtension,
+  fetchOHLCV,
+} from "./chartData";
 
 let cachedDashboard: any = null;
 let lastFetch = 0;
@@ -179,5 +185,147 @@ export async function registerRoutes(httpServer: Server, app: Express) {
 
   app.get("/api/health", (req, res) => {
     res.json({ ok: true, timestamp: new Date().toISOString() });
+  });
+
+  // ── CHART ENGINE ROUTES ──────────────────────────────────────────────────────
+
+  // Breadth charts
+  app.get("/api/charts/breadth/:indicator", async (req, res) => {
+    try {
+      const data = await getBreadthData(req.params.indicator);
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // COT positioning charts
+  app.get("/api/charts/cot/:contract", async (req, res) => {
+    try {
+      const data = await getChartCOTData(req.params.contract);
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // FRED macro series
+  app.get("/api/charts/macro/:series", async (req, res) => {
+    try {
+      const data = await getMacroData(req.params.series);
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Price / OHLCV
+  app.get("/api/charts/price/:ticker", async (req, res) => {
+    try {
+      const data = await fetchOHLCV(req.params.ticker);
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Ratio chart (ticker vs benchmark)
+  app.get("/api/charts/ratio/:ticker/:benchmark", async (req, res) => {
+    try {
+      const data = await getRatioData(req.params.ticker, req.params.benchmark);
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Liquidity composite
+  app.get("/api/charts/liquidity", async (_req, res) => {
+    try {
+      const data = await getLiquidityComposite();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Yield curve
+  app.get("/api/charts/yield-curve", async (_req, res) => {
+    try {
+      const data = await getYieldCurve();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Credit spreads
+  app.get("/api/charts/credit-spreads", async (_req, res) => {
+    try {
+      const data = await getCreditSpreads();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Sector rotation
+  app.get("/api/charts/sector-rotation", async (_req, res) => {
+    try {
+      const data = await getSectorRotation();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Fed balance sheet
+  app.get("/api/charts/fed-balance-sheet", async (_req, res) => {
+    try {
+      const data = await getFedBalanceSheet();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // CTA positioning model
+  app.get("/api/charts/cta", async (_req, res) => {
+    try {
+      const data = await getCTAModel();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Trend Power Oscillator
+  app.get("/api/charts/tpo/:ticker", async (req, res) => {
+    try {
+      const data = await getTrendPower(req.params.ticker);
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // Daily Sentiment Index proxy
+  app.get("/api/charts/dsi/:ticker", async (req, res) => {
+    try {
+      const data = await getDSI(req.params.ticker);
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
+  });
+
+  // ATR Extension
+  app.get("/api/charts/atr-ext/:ticker", async (req, res) => {
+    try {
+      const data = await getATRExtension(req.params.ticker);
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message });
+    }
   });
 }
