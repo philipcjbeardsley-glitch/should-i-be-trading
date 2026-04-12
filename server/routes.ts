@@ -3,7 +3,7 @@ import type { Server } from "http";
 import { fetchAllMarketData } from "./marketData";
 import { fetchMacroIntelligence } from "./macroData";
 import { fetchThemeTrackerData, fetchSectorSnapshot, fetchCOTData } from "./themeData";
-import { fetchBreadthData, fetchSetupsData } from "./breadthData";
+import { fetchBreadthData, fetchSetupsData, getAtrExtendedTickers } from "./breadthData";
 import { runExpectancyQuery, parseNaturalQuery } from "./expectancyData";
 import {
   getBreadthData, getMacroData, getLiquidityComposite, getYieldCurve,
@@ -128,6 +128,16 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     } catch (err: any) {
       console.error("Breadth error:", err?.message);
       res.status(500).json({ error: "Failed to fetch breadth data", detail: err?.message });
+    }
+  });
+
+  // 10x ATR Extended tickers
+  app.get("/api/breadth/atr-extended", async (_req, res) => {
+    try {
+      const data = await getAtrExtendedTickers();
+      res.json(data);
+    } catch (err: any) {
+      res.status(500).json({ error: "Failed to scan ATR extended tickers", detail: err?.message });
     }
   });
 

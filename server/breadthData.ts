@@ -415,3 +415,70 @@ function evaluateCustomPattern(pattern: any, data: any): boolean {
     return false;
   }
 }
+
+// ── 10x ATR Extended scanner ────────────────────────────────────────────────
+// Returns tickers from SETUP_TICKERS where |close - sma20| > 10 * ATR(14)
+export async function getAtrExtendedTickers(): Promise<{ tickers: { symbol: string; close: number; sma20: number; atr: number; extension: number; direction: "above" | "below" }[]; count: number }> {
+  const cacheKey = "atr_extended_tickers";
+  const cached = getCached(cacheKey);
+  if (cached) return cached;
+
+  const results: { symbol: string; close: number; sma20: number; atr: number; extension: number; direction: "above" | "below" }[] = [];
+
+  await Promise.all(
+    SETUP_TICKERS.map(async (symbol) => {
+      try {
+        const chartData = await fetchYahooChart(symbol, "3mo");
+        if (!chartData) return;
+        const { closes, highs, lows } = getOHLC(chartData);
+        if (closes.length < 22) return;
+
+        const validCloses = closes.filter((c): c is number => c != null && !isNaN(c));
+        const validHighs = highs.filter((h): h is number => h != null && !isNaN(h));
+        const validLows = lows.filter((l): l is number => l != null && !isNaN(l));
+        if (validCloses.length < 22) return;
+
+        const last = validCloses.length - 1;
+
+        // SMA(20)
+        const sma20 = validCloses.slice(last - 19, last + 1).reduce((a, b) => a + b, 0) / 20;
+
+        // ATR(14) — true range average
+        let atrSum = 0;
+        const atrLen = Math.min(14, last);
+        for (let i = last - atrLen + 1; i <= last; i++) {
+          const tr = Math.max(
+            validHighs[i] - validLows[i],
+            Math.abs(validHighs[i] - validCloses[i - 1]),
+            Math.abs(validLows[i] - validCloses[i - 1])
+          );
+          atrSum += tr;
+        }
+        const atr = atrSum / atrLen;
+
+        const close = validCloses[last];
+        const extension = Math.abs(close - sma20) / atr;
+
+        if (extension >= 10) {
+          results.push({
+            symbol,
+            close: Math.round(close * 100) / 100,
+            sma20: Math.round(sma20 * 100) / 100,
+            atr: Math.round(atr * 100) / 100,
+            extension: Math.round(extension * 10) / 10,
+            direction: close > sma20 ? "above" : "below",
+          });
+        }
+      } catch {
+        // skip
+      }
+    })
+  );
+
+  // Sort by extension descending
+  results.sort((a, b) => b.extension - a.extension);
+
+  const result = { tickers: results, count: results.length };
+  setCached(cacheKey, result);
+  return result;
+}

@@ -1,5 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
+import { useState, useRef, useEffect } from "react";
+
+const SETUP_TICKERS_COUNT = 42; // matches SETUP_TICKERS in server/breadthData.ts
 
 type CellData = { value: string | number; color: "green" | "red" | "neutral" };
 
@@ -57,7 +60,41 @@ export default function BreadthTab() {
 
   const { rows, headerSummary } = data;
 
+  // ATR Extended popover state
+  const [atrPopover, setAtrPopover] = useState<{ open: boolean; rowIndex: number; x: number; y: number }>({ open: false, rowIndex: -1, x: 0, y: 0 });
+  const [atrData, setAtrData] = useState<{ tickers: any[]; count: number } | null>(null);
+  const [atrLoading, setAtrLoading] = useState(false);
+  const popoverRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!atrPopover.open) return;
+    const handler = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setAtrPopover(p => ({ ...p, open: false }));
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [atrPopover.open]);
+
+  async function handleAtrClick(rowIndex: number, e: React.MouseEvent) {
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    setAtrPopover({ open: true, rowIndex, x: rect.left, y: rect.bottom + window.scrollY + 4 });
+    if (atrData) return; // already loaded
+    setAtrLoading(true);
+    try {
+      const res = await fetch("/api/breadth/atr-extended");
+      const json = await res.json();
+      setAtrData(json);
+    } catch {
+      setAtrData({ tickers: [], count: 0 });
+    } finally {
+      setAtrLoading(false);
+    }
+  }
+
   return (
+    <>
     <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
       {/* Advance/Decline summary bar — matches reference top bar */}
       <div
@@ -311,7 +348,28 @@ export default function BreadthTab() {
                   <Cell cell={row.down50Month} />
                   <Cell cell={row.up13_34days} />
                   <Cell cell={row.down13_34days} />
-                  <Cell cell={row.tenxAtrExt} />
+                  <td
+                    onClick={(e) => { if (i === 0) handleAtrClick(i, e); }}
+                    style={{
+                      background: row.tenxAtrExt.value > 5 ? "rgba(180,0,0,0.75)" : "transparent",
+                      color: row.tenxAtrExt.value > 5 ? "#fff" : "var(--bb-text-dim)",
+                      fontFamily: "IBM Plex Mono, monospace",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      textAlign: "center",
+                      padding: "5px 6px",
+                      border: "1px solid hsl(220 15% 10%)",
+                      whiteSpace: "nowrap",
+                      minWidth: 44,
+                      cursor: i === 0 ? "pointer" : "default",
+                      position: "relative",
+                    }}
+                  >
+                    {row.tenxAtrExt.value}
+                    {i === 0 && (
+                      <span style={{ fontSize: 7, color: "#64748b", marginLeft: 2, verticalAlign: "super" }}>▼</span>
+                    )}
+                  </td>
                   <Cell cell={row.above50dma} />
                   <Cell cell={row.stockUniverse} />
                 </tr>
@@ -321,5 +379,76 @@ export default function BreadthTab() {
         </table>
       </div>
     </div>
+
+      {/* ATR Extended Popover */}
+      {atrPopover.open && (
+        <div
+          ref={popoverRef}
+          style={{
+            position: "fixed",
+            top: Math.min(atrPopover.y, window.innerHeight - 320),
+            left: Math.max(8, Math.min(atrPopover.x, window.innerWidth - 340)),
+            width: 320,
+            maxHeight: 300,
+            overflowY: "auto",
+            background: "#0d1829",
+            border: "1px solid #1e3a5f",
+            borderRadius: 4,
+            zIndex: 9999,
+            padding: "10px 12px",
+            boxShadow: "0 8px 32px rgba(0,0,0,0.7)",
+          }}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 11, fontWeight: 700, color: "#7b3db5" }}>
+              10x ATR Extended — Today
+            </span>
+            <button
+              onClick={() => setAtrPopover(p => ({ ...p, open: false }))}
+              style={{ background: "none", border: "none", color: "#64748b", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}
+            >
+              ✕
+            </button>
+          </div>
+          {atrLoading && (
+            <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: "#64748b", padding: "8px 0" }}>
+              Scanning tickers...
+            </div>
+          )}
+          {!atrLoading && atrData && atrData.tickers.length === 0 && (
+            <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: "#64748b", padding: "8px 0" }}>
+              No tickers currently extended 10x+ ATR from SMA20.
+            </div>
+          )}
+          {!atrLoading && atrData && atrData.tickers.length > 0 && (
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {["Ticker", "Close", "SMA20", "ATR", "Ext×"].map(h => (
+                    <th key={h} style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 9, fontWeight: 700, color: "#475569", textAlign: h === "Ticker" ? "left" : "right", paddingBottom: 4, borderBottom: "1px solid #1e3a5f" }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {atrData.tickers.map((t: any) => (
+                  <tr key={t.symbol}>
+                    <td style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, fontWeight: 700, color: t.direction === "above" ? "#22c55e" : "#ef4444", padding: "3px 0" }}>{t.symbol}</td>
+                    <td style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: "#cbd5e1", textAlign: "right", padding: "3px 4px" }}>{t.close}</td>
+                    <td style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: "#94a3b8", textAlign: "right", padding: "3px 4px" }}>{t.sma20}</td>
+                    <td style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, color: "#64748b", textAlign: "right", padding: "3px 4px" }}>{t.atr}</td>
+                    <td style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 10, fontWeight: 700, color: "#eab308", textAlign: "right", padding: "3px 0" }}>{t.extension}×</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          <div style={{ marginTop: 8, fontFamily: "IBM Plex Mono, monospace", fontSize: 9, color: "#334155" }}>
+            Universe: {SETUP_TICKERS_COUNT} tracked names · green = above SMA20 · red = below
+          </div>
+        </div>
+      )}
+    </>
   );
 }
