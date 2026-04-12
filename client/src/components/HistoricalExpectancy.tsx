@@ -295,9 +295,14 @@ export default function HistoricalExpectancy() {
         if (!history.includes(naturalQuery.trim())) setHistory(p => [naturalQuery.trim(), ...p].slice(0, 10));
       } else {
         if (!ticker.trim() || !conditions.length) { setError("Enter a ticker and at least one condition"); setLoading(false); return; }
+        // Send both formats: new `group` for updated Railway, plus legacy `conditions`
+        // array so it works even if Railway hasn't redeployed yet
+        const mappedConds = conditions.map(rowToPayload);
         body = {
           ticker: ticker.toUpperCase(),
-          group: { logic, conditions: conditions.map(rowToPayload) },
+          logic,
+          conditions: mappedConds,
+          group: { logic, conditions: mappedConds },
         };
       }
       const res = await apiRequest("POST", "/api/expectancy", body);
