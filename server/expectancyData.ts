@@ -337,7 +337,14 @@ export async function runExpectancyQuery(params: QueryParams) {
 //   "AAPL near 52-week high"
 
 export function parseNaturalQuery(query: string): QueryParams | null {
-  const q = query.trim().toLowerCase();
+  // Normalize synonyms before parsing
+  const q = query.trim().toLowerCase()
+    .replace(/trading sessions?/g, "days")
+    .replace(/sessions?/g, "days")
+    .replace(/\bweeks?\b/g, "week")
+    .replace(/\bmonths?\b/g, "month")
+    .replace(/rsi\s*(?:at|=|is|of)\s*([\d.]+)/g, (_, n) => `rsi above ${parseFloat(n) - 2}`)
+    .replace(/rsi\s*(?:around|near|~)\s*([\d.]+)/g, (_, n) => `rsi above ${parseFloat(n) - 3}`);
 
   // Extract ticker — first word that's all caps (or we uppercase first token)
   const tickerMatch = query.match(/^([A-Za-z]{1,5})\b/);
