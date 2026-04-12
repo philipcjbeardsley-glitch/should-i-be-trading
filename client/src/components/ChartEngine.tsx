@@ -154,7 +154,7 @@ const CATEGORIES = [
 
 // ─── Build Plotly figure from data + chart def ────────────────────────────────
 // showPrice: false = indicator fills full height (default)
-// showPrice: true  = indicator top 65%, price bottom 35%
+// showPrice: true  = indicator top 63%, price bottom 32%, gap 5%
 function buildFigure(
   def: ChartDef,
   indData: any,
@@ -168,445 +168,708 @@ function buildFigure(
 
   const hasPricePane = showPrice && !!def.priceTicker && !!priceData?.length;
 
-  // ── Sector Rotation scatter (special case — no price pane ever) ────────────
-  if (def.id === "3E") {
-    if (!Array.isArray(indData) || !indData.length) return null;
-    const colors = indData.map((d: any) => {
-      if (d.rs > 0 && d.momentum > 0) return GREEN;
-      if (d.rs > 0 && d.momentum <= 0) return AMBER;
-      if (d.rs <= 0 && d.momentum > 0) return BLUE;
-      return RED;
-    });
-    return {
-      data: [{
-        type: "scatter",
-        mode: "markers+text",
-        x: indData.map((d: any) => d.rs),
-        y: indData.map((d: any) => d.momentum),
-        text: indData.map((d: any) => d.symbol),
-        textposition: "middle center",
-        textfont: { family: FONT, size: 10, color: colors },
-        marker: { color: colors, size: 28, opacity: 0.15, line: { color: colors, width: 1.5 } },
-        hovertemplate: "<b>%{text}</b><br>RS: %{x:.2f}<br>Mom: %{y:.2f}<extra></extra>",
-      } as any],
-      layout: {
-        ...baseLayout("Sector Rotation — RS vs Momentum"),
-        xaxis: { ...axisStyle(), title: { text: "Relative Strength →", font: { family: FONT, size: 10, color: AXIS_CLR } }, zeroline: true, zerolinecolor: REFLINE, zerolinewidth: 1 },
-        yaxis: { ...axisStyle(), title: { text: "Momentum →", font: { family: FONT, size: 10, color: AXIS_CLR } }, zeroline: true },
-        annotations: [
-          { x: 0.95, y: 0.95, xref: "paper", yref: "paper", text: "LEADING", showarrow: false, font: { color: GREEN, size: 9, family: FONT } },
-          { x: 0.05, y: 0.95, xref: "paper", yref: "paper", text: "IMPROVING", showarrow: false, font: { color: BLUE, size: 9, family: FONT } },
-          { x: 0.95, y: 0.05, xref: "paper", yref: "paper", text: "WEAKENING", showarrow: false, font: { color: AMBER, size: 9, family: FONT } },
-          { x: 0.05, y: 0.05, xref: "paper", yref: "paper", text: "LAGGING", showarrow: false, font: { color: RED, size: 9, family: FONT } },
-        ],
-      } as any,
-    };
+  // ── Shared layout constants ────────────────────────────────────────────────
+  const IND_DOMAIN_FULL: [number,number]   = [0.0,  1.0];
+  const IND_DOMAIN_SPLIT: [number,number]  = [0.36, 1.0];
+  const PRICE_DOMAIN: [number,number]      = [0.0,  0.32];
+
+  const indDomain  = hasPricePane ? IND_DOMAIN_SPLIT : IND_DOMAIN_FULL;
+
+  // Shared axis style
+  const ax = (extra: any = {}): any => ({
+    gridcolor: "#0d1f35",
+    gridwidth: 0.5,
+    linecolor: "#0d1f35",
+    linewidth: 0.5,
+    zerolinecolor: "#1e3a5f",
+    zerolinewidth: 1,
+    tickfont: { family: FONT, size: 10, color: "#64748b" },
+    color: "#64748b",
+    showgrid: true,
+    ...extra,
+  });
+
+  const baseL = (): any => ({
+    paper_bgcolor: "#060b14",
+    plot_bgcolor:  "#060b14",
+    font: { family: FONT, size: 10, color: "#64748b" },
+    margin: { l: 60, r: 20, t: 10, b: 40 },
+    showlegend: true,
+    legend: {
+      x: 0.01, y: 0.99, xanchor: "left", yanchor: "top",
+      bgcolor: "rgba(6,11,20,0.75)", bordercolor: "#0d1f35", borderwidth: 1,
+      font: { family: FONT, size: 9, color: "#64748b" },
+      orientation: "h",
+    },
+    hovermode: "x unified",
+    hoverlabel: { bgcolor: "#0f172a", bordercolor: "#1e293b", font: { family: FONT, size: 10 } },
+    dragmode: "pan",
+  });
+
+  // Helper: right-edge annotation
+  const rightAnnot = (text: string, y: number, yref: string, color: string, yanchor = "middle"): any => ({
+    xref: "paper", x: 1.0, xanchor: "left",
+    yref, y, yanchor,
+    text, showarrow: false,
+    font: { family: FONT, size: 8, color },
+  });
+
+  // Helper: horizontal dotted reference line
+  const refLine = (y: number, yref: string, color = "#334155", width = 1, dash = "dot"): any => ({
+    type: "line", xref: "paper", x0: 0, x1: 1,
+    yref, y0: y, y1: y,
+    line: { color, width, dash },
+  });
+
+  // Helper: full-width vertical line (for signals)
+  const vline = (x: string, color: string, width = 1): any => ({
+    type: "line", yref: "paper", y0: 0, y1: 1,
+    xref: "x", x0: x, x1: x,
+    line: { color, width, dash: "solid" },
+  });
+
+  // Helper: price area trace on y1
+  const priceAreaTrace = (dates: string[], closes: number[], label: string): any => ({
+    type: "scatter", mode: "lines",
+    x: dates, y: closes, name: label, yaxis: "y1",
+    line: { color: "#38bdf8", width: 1 },
+    fill: "tozeroy", fillcolor: "rgba(56,189,248,0.06)",
+    hovertemplate: `${label}: %{y:.2f}<extra></extra>`,
+  });
+
+  // Build filtered price arrays
+  let priceDates: string[] = [];
+  let priceClose: number[] = [];
+  if (hasPricePane && priceData) {
+    const pf = filterDates(priceData, tf);
+    pf.forEach((b: any) => { if (b.close != null) { priceDates.push(b.date); priceClose.push(b.close); } });
   }
 
-  // ── SPY Volume (special: keep as-is — price on top, histogram below) ──────
-  if (def.id === "4C") {
+  // Standard dual-pane layout builder
+  const dualLayout = (extraShapes: any[] = [], extraAnnots: any[] = []): any => ({
+    ...baseL(),
+    shapes: extraShapes,
+    annotations: extraAnnots,
+    ...(hasPricePane ? {
+      yaxis:  ax({ domain: PRICE_DOMAIN, side: "right", color: "#334155", tickfont: { family: FONT, size: 9, color: "#334155" }, showgrid: false }),
+      yaxis2: ax({ domain: IND_DOMAIN_SPLIT, side: "left" }),
+      xaxis:  ax({ anchor: "y2", matches: "x" }),
+    } : {
+      yaxis2: ax({ domain: IND_DOMAIN_FULL, side: "left" }),
+      xaxis:  ax({ anchor: "y2" }),
+    }),
+  });
+
+  // ── Sector Rotation scatter ────────────────────────────────────────────────
+  if (def.id === "3E") {
     if (!Array.isArray(indData) || !indData.length) return null;
-    const d = filterDates(indData, tf);
-    const dates = d.map((r: any) => r.date);
-    const closes = d.map((r: any) => r.close);
-    const vols = d.map((r: any) => r.volume);
-    const avg20 = d.map((r: any) => r.avgVol20);
-    const volColors = d.map((r: any) =>
-      (r.avgVol20 != null && r.volume > r.avgVol20) ? RED + "cc" : BLUE + "55"
-    );
+    // Quadrant colors
+    const qColor = (d: any) => d.rs > 0 && d.momentum > 0 ? "#22c55e"
+      : d.rs <= 0 && d.momentum > 0 ? "#eab308"
+      : d.rs > 0 && d.momentum <= 0 ? "#38bdf8"
+      : "#ef4444";
+    const colors = indData.map(qColor);
+
+    // Quadrant background shapes
+    const qShapes: any[] = [
+      { type: "rect", xref: "paper", yref: "paper", x0: 0.5, x1: 1, y0: 0.5, y1: 1, fillcolor: "rgba(34,197,94,0.06)",  line: { width: 0 } },
+      { type: "rect", xref: "paper", yref: "paper", x0: 0,   x1: 0.5, y0: 0.5, y1: 1, fillcolor: "rgba(234,179,8,0.06)", line: { width: 0 } },
+      { type: "rect", xref: "paper", yref: "paper", x0: 0,   x1: 0.5, y0: 0,   y1: 0.5, fillcolor: "rgba(239,68,68,0.06)",  line: { width: 0 } },
+      { type: "rect", xref: "paper", yref: "paper", x0: 0.5, x1: 1,   y0: 0,   y1: 0.5, fillcolor: "rgba(56,189,248,0.06)", line: { width: 0 } },
+    ];
+
+    const qAnnots: any[] = [
+      { xref: "paper", yref: "paper", x: 0.97, y: 0.97, text: "LEADING",   showarrow: false, font: { family: FONT, size: 9, color: "#22c55e" }, xanchor: "right", yanchor: "top" },
+      { xref: "paper", yref: "paper", x: 0.03, y: 0.97, text: "WEAKENING", showarrow: false, font: { family: FONT, size: 9, color: "#eab308" }, xanchor: "left",  yanchor: "top" },
+      { xref: "paper", yref: "paper", x: 0.03, y: 0.03, text: "LAGGING",   showarrow: false, font: { family: FONT, size: 9, color: "#ef4444" }, xanchor: "left",  yanchor: "bottom" },
+      { xref: "paper", yref: "paper", x: 0.97, y: 0.03, text: "IMPROVING", showarrow: false, font: { family: FONT, size: 9, color: "#38bdf8" }, xanchor: "right", yanchor: "bottom" },
+    ];
 
     return {
       data: [
         {
-          type: "scatter", mode: "lines",
-          x: dates, y: closes, yaxis: "y1", name: "SPY",
-          line: { color: PRICE_CLR, width: 1 },
-          hovertemplate: "SPY: %{y:.2f}<extra></extra>",
-        },
+          type: "scatter", mode: "markers",
+          x: indData.map((d: any) => d.rs),
+          y: indData.map((d: any) => d.momentum),
+          marker: { color: colors, size: 10, opacity: 0.9, line: { color: colors, width: 1 } },
+          hovertemplate: "<b>%{text}</b><br>RS: %{x:.2f}<br>Mom: %{y:.2f}<extra></extra>",
+          text: indData.map((d: any) => d.symbol),
+          showlegend: false,
+        } as any,
+        // Sector label annotations rendered as scatter text
         {
-          type: "bar",
-          x: dates, y: vols, yaxis: "y2", name: "Volume",
-          marker: { color: volColors },
-          hovertemplate: "Vol: %{y:,.0f}<extra></extra>",
-        },
-        {
-          type: "scatter", mode: "lines",
-          x: dates, y: avg20, yaxis: "y2", name: "20d Avg",
-          line: { color: AMBER, width: 1.5, dash: "dot" },
-          hovertemplate: "20d Avg: %{y:,.0f}<extra></extra>",
-        },
-      ] as any,
+          type: "scatter", mode: "text",
+          x: indData.map((d: any) => d.rs),
+          y: indData.map((d: any) => d.momentum),
+          text: indData.map((d: any) => d.symbol),
+          textposition: "top center",
+          textfont: { family: FONT, size: 9, color: colors },
+          hoverinfo: "skip",
+          showlegend: false,
+        } as any,
+      ],
       layout: {
-        ...baseLayout(),
-        grid: { rows: 2, columns: 1, pattern: "coupled", roworder: "top to bottom" },
-        yaxis:  { ...axisStyle(), domain: [0.38, 1.0], title: { text: "SPY", font: { size: 9, color: AXIS_CLR, family: FONT } } },
-        yaxis2: { ...axisStyle(), domain: [0, 0.34] },
-        xaxis:  { ...axisStyle(), anchor: "y2", matches: "x" },
-        shapes: [
-          { type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: 0.36, y1: 0.36, line: { color: GRID, width: 1 } } as any,
-        ],
-        margin: { l: 52, r: 60, t: 8, b: 40 },
-      } as any,
+        ...baseL(),
+        shapes: qShapes,
+        annotations: qAnnots,
+        xaxis: ax({ title: { text: "Relative Strength", font: { family: FONT, size: 10, color: "#64748b" } }, zeroline: true, zerolinecolor: "#1e3a5f", zerolinewidth: 1.5 }),
+        yaxis: ax({ title: { text: "Momentum", font: { family: FONT, size: 10, color: "#64748b" } }, zeroline: true, zerolinecolor: "#1e3a5f", zerolinewidth: 1.5 }),
+      },
     };
   }
 
-  // ── Fed Balance Sheet (no price pane, overlay on same chart — keep as-is) ──
+  // ── SPY Volume ──────────────────────────────────────────────────────────────
+  if (def.id === "4C") {
+    if (!Array.isArray(indData) || !indData.length) return null;
+    const d = filterDates(indData, tf);
+    const dates  = d.map((r: any) => r.date);
+    const closes = d.map((r: any) => r.close);
+    const vols   = d.map((r: any) => r.volume);
+    const avg20  = d.map((r: any) => r.avgVol20);
+    const volColors = d.map((r: any) =>
+      (r.avgVol20 != null && r.volume > r.avgVol20) ? "rgba(239,68,68,0.75)" : "rgba(56,189,248,0.35)"
+    );
+    return {
+      data: [
+        { type: "scatter", mode: "lines", x: dates, y: closes, yaxis: "y1", name: "SPY",
+          line: { color: "#38bdf8", width: 1 }, fill: "tozeroy", fillcolor: "rgba(56,189,248,0.06)",
+          hovertemplate: "SPY: %{y:.2f}<extra></extra>" } as any,
+        { type: "bar", x: dates, y: vols, yaxis: "y2", name: "Volume",
+          marker: { color: volColors }, hovertemplate: "Vol: %{y:,.0f}<extra></extra>" } as any,
+        { type: "scatter", mode: "lines", x: dates, y: avg20, yaxis: "y2", name: "20d Avg",
+          line: { color: "#eab308", width: 1.5, dash: "dot" },
+          hovertemplate: "20d Avg: %{y:,.0f}<extra></extra>" } as any,
+      ],
+      layout: {
+        ...baseL(),
+        yaxis:  ax({ domain: [0.38, 1.0], side: "right", color: "#334155", showgrid: false }),
+        yaxis2: ax({ domain: [0.0, 0.34], side: "left" }),
+        xaxis:  ax({ anchor: "y2", matches: "x" }),
+        shapes: [{ type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: 0.36, y1: 0.36, line: { color: "#0d1f35", width: 1 } }],
+      },
+    };
+  }
+
+  // ── Fed Balance Sheet ────────────────────────────────────────────────────
   if (def.id === "3D") {
     if (!Array.isArray(indData) || !indData.length) return null;
     const d = filterDates(indData, tf);
     return {
       data: [
-        {
-          type: "scatter", mode: "lines",
-          x: d.map((r: any) => r.date),
-          y: d.map((r: any) => r.fedBS),
-          name: "Fed Assets ($B)",
-          fill: "tozeroy",
-          fillcolor: BLUE + "22",
-          line: { color: BLUE, width: 2 },
-          yaxis: "y1",
-          hovertemplate: "Fed BS: $%{y:.0f}B<extra></extra>",
-        },
-        {
-          type: "scatter", mode: "lines",
-          x: d.map((r: any) => r.date),
-          y: d.map((r: any) => r.spyClose),
-          name: "SPY",
-          line: { color: GREEN, width: 1.5 },
-          yaxis: "y2",
-          hovertemplate: "SPY: %{y:.2f}<extra></extra>",
-        },
-      ] as any,
+        { type: "scatter", mode: "lines", x: d.map((r: any) => r.date), y: d.map((r: any) => r.fedBS),
+          name: "Fed Assets ($B)", fill: "tozeroy", fillcolor: "rgba(56,189,248,0.08)",
+          line: { color: "#38bdf8", width: 1.5 }, yaxis: "y1",
+          hovertemplate: "Fed BS: $%{y:.0f}B<extra></extra>" } as any,
+        { type: "scatter", mode: "lines", x: d.map((r: any) => r.date), y: d.map((r: any) => r.spyClose),
+          name: "SPY", line: { color: "#22c55e", width: 1.5 }, yaxis: "y2",
+          hovertemplate: "SPY: %{y:.2f}<extra></extra>" } as any,
+      ],
       layout: {
-        ...baseLayout(),
-        yaxis:  { ...axisStyle(), title: { text: "Fed Assets ($B)", font: { size: 9, color: BLUE, family: FONT } }, side: "left" },
-        yaxis2: { ...axisStyle(), title: { text: "SPY", font: { size: 9, color: GREEN, family: FONT } }, side: "right", overlaying: "y" },
-        xaxis:  { ...axisStyle() },
-      } as any,
+        ...baseL(),
+        yaxis:  ax({ title: { text: "Fed Assets ($B)", font: { size: 9, color: "#38bdf8", family: FONT } }, side: "left" }),
+        yaxis2: ax({ title: { text: "SPY", font: { size: 9, color: "#22c55e", family: FONT } }, side: "right", overlaying: "y" }),
+        xaxis:  ax({}),
+      },
     };
   }
 
-  // ── Standard dual-pane charts ────────────────────────────────────────────
-  // Pane geometry:
-  //   Default (showPrice=false): indicator y2 fills [0, 1], no price pane
-  //   Toggle open (showPrice=true): indicator y2 = [0.37, 1.0], price y1 = [0.0, 0.33]
-  const indDomain: [number, number] = hasPricePane ? [0.37, 1.0] : [0.0, 1.0];
-  const priceDomain: [number, number] = [0.0, 0.33];
-
-  // Build price trace (bottom pane, y1) — only when showPrice=true
-  const priceDates: string[] = [];
-  const priceClose: number[] = [];
-  if (hasPricePane && priceData) {
-    const pFiltered = filterDates(priceData, tf);
-    pFiltered.forEach((b: any) => { if (b.close != null) { priceDates.push(b.date); priceClose.push(b.close); } });
-  }
-
-  const traces: Plotly.Data[] = [];
-  const shapes: Partial<Plotly.Shape>[] = [];
-
-  // Divider line between panes — only when price pane is visible
-  if (hasPricePane) {
-    shapes.push(
-      { type: "line", xref: "paper", x0: 0, x1: 1, yref: "paper", y0: 0.35, y1: 0.35, line: { color: GRID, width: 1 } } as any,
-    );
-  }
-
-  if (hasPricePane) {
-    traces.push({
-      type: "scatter", mode: "lines",
-      x: priceDates, y: priceClose,
-      name: activeTicker,
-      yaxis: "y1",
-      line: { color: PRICE_CLR, width: 1 },
-      hovertemplate: `${activeTicker}: %{y:.2f}<extra></extra>`,
-    } as any);
-  }
-
-  // ── Build indicator traces (y2) ────────────────────────────────────────────
-  const iref = "y2";
-
-  const addLine = (x: string[], y: (number|null)[], name: string, color: string, width = 2.5, dash?: string) => {
-    traces.push({
-      type: "scatter", mode: "lines",
-      x, y, name, yaxis: iref,
-      line: { color, width, ...(dash ? { dash } : {}) },
-      hovertemplate: `${name}: %{y:.3f}<extra></extra>`,
-    } as any);
-  };
-
-  const addBar = (x: string[], y: (number|null)[], name: string, colors: string[]) => {
-    traces.push({
-      type: "bar",
-      x, y, name, yaxis: iref,
-      marker: { color: colors },
-      hovertemplate: `${name}: %{y:.3f}<extra></extra>`,
-    } as any);
-  };
-
+  // ───────────────────────────────────────────────────────────────
+  // STANDARD DUAL-PANE CHARTS
+  // ───────────────────────────────────────────────────────────────
+  const traces: any[] = [];
+  const shapes: any[] = [];
+  const annots: any[] = [];
   const raw = Array.isArray(indData) ? filterDates(indData, tf) : [];
 
+  // Price trace (y1, bottom pane)
+  if (hasPricePane) {
+    traces.push(priceAreaTrace(priceDates, priceClose, activeTicker));
+  }
+
   switch (def.id) {
-    // ── BREADTH ──────────────────────────────────────────────────────────────
+
+    // ── 1A: % Above Moving Averages ──────────────────────────────────────
     case "1A": {
-      const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.pct20  ?? null), "% >20d MA",  GREEN, 2);
-      addLine(x, raw.map((d: any) => d.pct50  ?? null), "% >50d MA",  AMBER, 2);
-      addLine(x, raw.map((d: any) => d.pct200 ?? null), "% >200d MA", RED,   2);
+      const x   = raw.map((d: any) => d.date);
+      const v200 = raw.map((d: any) => d.pct200 ?? null);
+      traces.push(
+        { type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.pct20  ?? null), name: "20d MA",  yaxis: "y2", line: { color: "#38bdf8", width: 1.5 }, hovertemplate: "20d: %{y:.0f}%<extra></extra>" },
+        { type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.pct50  ?? null), name: "50d MA",  yaxis: "y2", line: { color: "#eab308", width: 1.5 }, hovertemplate: "50d: %{y:.0f}%<extra></extra>" },
+        { type: "scatter", mode: "lines", x, y: v200, name: "200d MA", yaxis: "y2", line: { color: "#22c55e", width: 1.5 }, hovertemplate: "200d: %{y:.0f}%<extra></extra>" },
+      );
+      // Background zones based on % above 200d
+      raw.forEach((d: any, i: number) => {
+        if (i === 0 || !d.pct200 || !raw[i-1].pct200) return;
+        const v = d.pct200;
+        const color = v > 60 ? "rgba(34,197,94,0.04)" : v < 40 ? "rgba(239,68,68,0.04)" : null;
+        if (color) {
+          shapes.push({ type: "rect", xref: "x", yref: "paper",
+            x0: raw[i-1].date, x1: d.date,
+            y0: hasPricePane ? IND_DOMAIN_SPLIT[0] : 0,
+            y1: 1,
+            fillcolor: color, line: { width: 0 }, layer: "below" });
+        }
+      });
       shapes.push(
-        hline(80, iref, "OB", RED + "99"),
-        hline(20, iref, "OS", GREEN + "99"),
-        hline(50, iref, "50", REFLINE),
+        refLine(80, "y2", "#1e3a5f"), refLine(60, "y2"),
+        refLine(40, "y2"), refLine(20, "y2", "#1e3a5f"),
       );
       break;
     }
+
+    // ── 1B: McClellan Oscillator ──────────────────────────────────────────
     case "1B": {
       const x = raw.map((d: any) => d.date);
       const y = raw.map((d: any) => d.value ?? null);
-      const barColors = raw.map((d: any) => (d.value ?? 0) >= 0 ? GREEN + "cc" : RED + "cc");
-      addBar(x, y, "McClellan Osc", barColors);
-      shapes.push(hline(0, iref, "0", REFLINE));
+      traces.push({
+        type: "bar", x, y, name: "McClellan", yaxis: "y2",
+        marker: { color: y.map((v: any) => (v ?? 0) >= 0 ? "rgba(34,197,94,0.8)" : "rgba(239,68,68,0.8)") },
+        hovertemplate: "McC: %{y:.2f}<extra></extra>",
+      });
+      shapes.push(
+        { ...refLine(0,   "y2", "#1e3a5f", 1.5, "solid") },
+        { ...refLine(50,  "y2", "#475569", 1,   "dash") },
+        { ...refLine(-50, "y2", "#475569", 1,   "dash") },
+      );
+      annots.push(
+        rightAnnot("OVERBOUGHT",  50,  "y2", "#475569", "bottom"),
+        rightAnnot("OVERSOLD",   -50,  "y2", "#475569", "top"),
+      );
       break;
     }
+
+    // ── 1C: RSI Breadth ───────────────────────────────────────────────────
     case "1C": {
       const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.value ?? null), "Median RSI", BLUE);
+      traces.push({ type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.value ?? null),
+        name: "Median RSI", yaxis: "y2", line: { color: "#38bdf8", width: 1.5 },
+        hovertemplate: "RSI: %{y:.1f}<extra></extra>" });
       shapes.push(
-        hline(70, iref, "OB 70", RED + "99"),
-        hline(30, iref, "OS 30", GREEN + "99"),
-        hline(50, iref, "Neutral", REFLINE),
+        refLine(70, "y2", "#475569", 1, "dash"),
+        refLine(50, "y2"),
+        refLine(30, "y2", "#475569", 1, "dash"),
+      );
+      annots.push(
+        rightAnnot("OB 70", 70, "y2", "#475569", "bottom"),
+        rightAnnot("OS 30", 30, "y2", "#475569", "top"),
       );
       break;
     }
+
+    // ── 1D: MACD Breadth ─────────────────────────────────────────────────
     case "1D": {
       const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.value ?? null), "% MACD Bullish", AMBER);
-      shapes.push(hline(50, iref, "50%", REFLINE));
+      traces.push({ type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.value ?? null),
+        name: "% MACD Bullish", yaxis: "y2", line: { color: "#eab308", width: 1.5 },
+        hovertemplate: "MACD Breadth: %{y:.1f}%<extra></extra>" });
+      shapes.push(refLine(50, "y2"), refLine(80, "y2", "#475569", 1, "dash"), refLine(20, "y2", "#475569", 1, "dash"));
+      annots.push(rightAnnot("80", 80, "y2", "#475569"), rightAnnot("20", 20, "y2", "#475569"));
       break;
     }
+
+    // ── 1E: Zweig Breadth Thrust ───────────────────────────────────────────
     case "1E": {
       const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.value ?? null), "Zweig Thrust", ACCENT, 2.5);
+      const y = raw.map((d: any) => d.value ?? null);
+      traces.push({ type: "scatter", mode: "lines", x, y,
+        name: "Zweig Thrust", yaxis: "y2", line: { color: "#38bdf8", width: 1.5 },
+        hovertemplate: "ZBT: %{y:.4f}<extra></extra>" });
+      // Neutral zone 0.40–0.615 shaded
       shapes.push(
-        hline(0.615, iref, "Thrust 0.615", GREEN + "99"),
-        hline(0.4,   iref, "Bear 0.4",     RED   + "99"),
-        hline(0.5,   iref, "Neutral",       REFLINE),
+        { type: "rect", xref: "paper", yref: "y2", x0: 0, x1: 1,
+          y0: 0.40, y1: 0.615, fillcolor: "rgba(234,179,8,0.08)", line: { width: 0 }, layer: "below" },
+        refLine(0.615, "y2", "#22c55e", 1, "dash"),
+        refLine(0.40,  "y2", "#ef4444", 1, "dash"),
+        refLine(0.5,   "y2"),
       );
+      annots.push(
+        rightAnnot("THRUST 0.615", 0.615, "y2", "#22c55e", "bottom"),
+        rightAnnot("BEAR 0.40",    0.40,  "y2", "#ef4444", "top"),
+      );
+      // Detect ZBT signals: value crosses from <0.40 to >0.615 within 10 days
+      for (let i = 1; i < raw.length; i++) {
+        const cur = raw[i].value ?? 0;
+        if (cur >= 0.615) {
+          // Look back 10 bars for a reading below 0.40
+          const lookback = raw.slice(Math.max(0, i - 10), i);
+          const hadLow = lookback.some((d: any) => (d.value ?? 1) < 0.40);
+          if (hadLow) {
+            shapes.push({ type: "line", xref: "x", yref: "paper",
+              x0: raw[i].date, x1: raw[i].date, y0: 0, y1: 1,
+              line: { color: "#22c55e", width: 1.5, dash: "solid" } });
+            annots.push({ xref: "x", yref: "paper", x: raw[i].date, y: 0.98,
+              text: "ZBT", showarrow: false,
+              font: { family: FONT, size: 9, color: "#22c55e" }, yanchor: "top", xanchor: "center" });
+          }
+        }
+      }
       break;
     }
+
+    // ── 1F: A-D Line ───────────────────────────────────────────────────────────
     case "1F": {
       const x = raw.map((d: any) => d.date);
-      traces.push({
-        type: "scatter", mode: "lines",
-        x, y: raw.map((d: any) => d.value ?? null),
-        name: "A-D Line", yaxis: iref,
-        fill: "tozeroy", fillcolor: GREEN + "22",
-        line: { color: GREEN, width: 2 },
-        hovertemplate: "A-D: %{y:.0f}<extra></extra>",
-      } as any);
+      traces.push({ type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.value ?? null),
+        name: "A-D Line", yaxis: "y2",
+        line: { color: "#38bdf8", width: 1.5 },
+        fill: "tozeroy", fillcolor: "rgba(56,189,248,0.08)",
+        hovertemplate: "A-D: %{y:.0f}<extra></extra>" });
       break;
     }
 
-    // ── COT POSITIONING ───────────────────────────────────────────────────────
+    // ── 2A/2B/2C/2D: COT Positioning ───────────────────────────────────────
     case "2A": case "2B": case "2C": case "2D": {
       const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.largeSpecNet ?? null), "Large Spec Net", GREEN, 2.5);
-      addLine(x, raw.map((d: any) => d.assetMgrNet  ?? null), "Asset Mgr Net",  BLUE, 1.5, "dot");
-      addLine(x, raw.map((d: any) => d.dealerNet    ?? null), "Dealer Net",      AMBER, 1.5, "dot");
-      shapes.push(hline(0, iref, "0", REFLINE));
+      const specVals = raw.map((d: any) => d.largeSpecNet ?? null);
+      // Large Spec as green/red histogram
+      traces.push({
+        type: "bar", x, y: specVals, name: "Large Spec Net", yaxis: "y2",
+        marker: { color: specVals.map((v: any) => (v ?? 0) >= 0 ? "rgba(34,197,94,0.8)" : "rgba(239,68,68,0.8)") },
+        hovertemplate: "Spec: %{y:,.0f}<extra></extra>",
+      });
+      // Asset Manager as thick blue line
+      traces.push({
+        type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.assetMgrNet ?? null),
+        name: "Asset Mgr Net", yaxis: "y2",
+        line: { color: "#38bdf8", width: 2 },
+        hovertemplate: "AssetMgr: %{y:,.0f}<extra></extra>",
+      });
+      // ±2 SD lines
+      const validSpec = specVals.filter((v: any) => v != null) as number[];
+      if (validSpec.length > 10) {
+        const mean = validSpec.reduce((a: number, b: number) => a + b, 0) / validSpec.length;
+        const std  = Math.sqrt(validSpec.reduce((a: number, b: number) => a + (b - mean) ** 2, 0) / validSpec.length);
+        const hi = mean + 2 * std;
+        const lo = mean - 2 * std;
+        shapes.push(
+          refLine(hi, "y2", "#ef4444", 1, "dash"),
+          refLine(lo, "y2", "#22c55e", 1, "dash"),
+          refLine(0,  "y2", "#1e3a5f", 1, "solid"),
+        );
+        annots.push(
+          rightAnnot("MAX CROWDED LONG",  hi, "y2", "#ef4444", "bottom"),
+          rightAnnot("MAX CROWDED SHORT", lo, "y2", "#22c55e", "top"),
+        );
+      }
       break;
     }
 
-    // ── SENTIMENT ─────────────────────────────────────────────────────────────
+    // ── 2E: CTA Trend Model ────────────────────────────────────────────────
     case "2E": {
       const x = raw.map((d: any) => d.date);
-      traces.push({
-        type: "scatter", mode: "lines",
-        x, y: raw.map((d: any) => d.value ?? null),
-        name: "CTA Exposure", yaxis: iref,
-        fill: "tozeroy", fillcolor: BLUE + "22",
-        line: { color: BLUE, width: 2.5 },
-        hovertemplate: "CTA: %{y:.1f}<extra></extra>",
-      } as any);
+      const y = raw.map((d: any) => d.value ?? null);
+      // Positive fill
+      traces.push({ type: "scatter", mode: "lines", x,
+        y: y.map((v: any) => v != null ? Math.max(0, v) : null),
+        name: "CTA Long", yaxis: "y2",
+        line: { color: "rgba(34,197,94,0)", width: 0 },
+        fill: "tozeroy", fillcolor: "rgba(34,197,94,0.08)",
+        showlegend: false, hoverinfo: "skip" });
+      // Negative fill
+      traces.push({ type: "scatter", mode: "lines", x,
+        y: y.map((v: any) => v != null ? Math.min(0, v) : null),
+        name: "CTA Short", yaxis: "y2",
+        line: { color: "rgba(239,68,68,0)", width: 0 },
+        fill: "tozeroy", fillcolor: "rgba(239,68,68,0.08)",
+        showlegend: false, hoverinfo: "skip" });
+      // Main line
+      traces.push({ type: "scatter", mode: "lines", x, y,
+        name: "CTA Exposure", yaxis: "y2",
+        line: { color: "#ef4444", width: 2 },
+        hovertemplate: "CTA: %{y:.1f}<extra></extra>" });
       shapes.push(
-        hline(0, iref, "0", REFLINE),
-        hline(50,  iref, "Max Long",  RED   + "99"),
-        hline(-50, iref, "Max Short", GREEN + "99"),
+        refLine(0,   "y2", "#1e3a5f", 1, "solid"),
+        refLine(75,  "y2", "#475569", 1, "dash"),
+        refLine(-75, "y2", "#475569", 1, "dash"),
+      );
+      annots.push(
+        rightAnnot("MAX CROWDED LONG",  75,  "y2", "#475569", "bottom"),
+        rightAnnot("MAX CROWDED SHORT", -75, "y2", "#475569", "top"),
       );
       break;
     }
+
+    // ── 2F: Put/Call Proxy ─────────────────────────────────────────────────
     case "2F": {
-      const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.value ?? null), "P/C Proxy", AMBER);
-      shapes.push(
-        hline(80, iref, "Extreme Bull", RED   + "99"),
-        hline(20, iref, "Extreme Bear", GREEN + "99"),
-        hline(50, iref, "Neutral",       REFLINE),
+      const x  = raw.map((d: any) => d.date);
+      const y  = raw.map((d: any) => d.value ?? null);
+      // 10-day SMA of the P/C proxy
+      const smaY: (number|null)[] = y.map((_: any, i: number) => {
+        if (i < 9) return null;
+        const slice = y.slice(i - 9, i + 1).filter((v: any) => v != null) as number[];
+        return slice.length === 10 ? slice.reduce((a: number, b: number) => a + b, 0) / 10 : null;
+      });
+      traces.push(
+        { type: "scatter", mode: "lines", x, y, name: "P/C Proxy", yaxis: "y2",
+          line: { color: "#eab308", width: 1.5 }, hovertemplate: "P/C: %{y:.1f}<extra></extra>" },
+        { type: "scatter", mode: "lines", x, y: smaY, name: "10d SMA", yaxis: "y2",
+          line: { color: "#38bdf8", width: 1, dash: "dash" }, hovertemplate: "SMA: %{y:.1f}<extra></extra>" },
       );
+      shapes.push(
+        refLine(85, "y2", "#ef4444", 1, "dash"),
+        refLine(50, "y2"),
+        refLine(20, "y2", "#22c55e", 1, "dash"),
+      );
+      annots.push(
+        rightAnnot("FEAR THRESHOLD 85", 85, "y2", "#ef4444", "bottom"),
+        rightAnnot("20", 20, "y2", "#22c55e", "top"),
+      );
+      // Buy signal markers on price pane: every time P/C proxy crosses above 85
+      if (hasPricePane && priceData) {
+        const priceMap = new Map(filterDates(priceData, tf).map((b: any) => [b.date, b.close]));
+        const sigDates: string[] = [];
+        const sigPrices: number[] = [];
+        for (let i = 1; i < raw.length; i++) {
+          const prev = raw[i-1].value ?? 0;
+          const cur  = raw[i].value   ?? 0;
+          if (prev < 85 && cur >= 85) {
+            const p = priceMap.get(raw[i].date);
+            if (p != null) { sigDates.push(raw[i].date); sigPrices.push(p); }
+          }
+        }
+        if (sigDates.length) {
+          traces.push({ type: "scatter", mode: "markers", x: sigDates, y: sigPrices,
+            name: "Buy Signal", yaxis: "y1",
+            marker: { symbol: "circle", color: "#22c55e", size: 8, line: { color: "#22c55e", width: 1 } },
+            hovertemplate: "BUY: %{y:.2f}<extra></extra>" });
+        }
+      }
       break;
     }
+
+    // ── 2G: Speculative Vol (VIX) ────────────────────────────────────────
     case "2G": {
       const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.value    ?? null), "VIX",      RED,  2.5);
-      addLine(x, raw.map((d: any) => d.vixSMA20 ?? null), "VIX 20d", AXIS_CLR, 1, "dot");
+      traces.push(
+        { type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.value ?? null),
+          name: "VIX", yaxis: "y2", line: { color: "#38bdf8", width: 1.5 },
+          hovertemplate: "VIX: %{y:.2f}<extra></extra>" },
+        { type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.vixSMA20 ?? null),
+          name: "VIX 20d SMA", yaxis: "y2", line: { color: "#eab308", width: 1.5 },
+          hovertemplate: "SMA20: %{y:.2f}<extra></extra>" },
+      );
       shapes.push(
-        hline(20, iref, "VIX 20", REFLINE),
-        hline(30, iref, "VIX 30", AMBER + "99"),
-        hline(40, iref, "VIX 40", RED   + "99"),
+        refLine(20, "y2"), refLine(30, "y2", "#eab308", 1, "dash"),
+        refLine(40, "y2", "#ef4444", 1, "dash"),
+      );
+      annots.push(
+        rightAnnot("VIX 30", 30, "y2", "#eab308"),
+        rightAnnot("VIX 40", 40, "y2", "#ef4444"),
       );
       break;
     }
+
+    // ── 2H: Sentiment Composite ──────────────────────────────────────────
     case "2H": {
       const x = raw.map((d: any) => d.date);
-      traces.push({
-        type: "scatter", mode: "lines",
-        x, y: raw.map((d: any) => d.value ?? null),
-        name: "Sentiment Score", yaxis: iref,
-        fill: "tozeroy", fillcolor: ACCENT + "22",
-        line: { color: ACCENT, width: 2.5 },
-        hovertemplate: "Sentiment: %{y:.1f}<extra></extra>",
-      } as any);
+      traces.push({ type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.value ?? null),
+        name: "Sentiment Score", yaxis: "y2",
+        line: { color: "#38bdf8", width: 1.5 },
+        fill: "tozeroy", fillcolor: "rgba(56,189,248,0.06)",
+        hovertemplate: "Sentiment: %{y:.1f}<extra></extra>" });
       shapes.push(
-        hline(80, iref, "Extreme Bull", RED   + "99"),
-        hline(20, iref, "Extreme Bear", GREEN + "99"),
-        hline(50, iref, "Neutral",       REFLINE),
+        refLine(80, "y2", "#475569", 1, "dash"),
+        refLine(50, "y2"),
+        refLine(20, "y2", "#475569", 1, "dash"),
+      );
+      annots.push(
+        rightAnnot("EXTREME BULL", 80, "y2", "#475569", "bottom"),
+        rightAnnot("EXTREME BEAR", 20, "y2", "#475569", "top"),
       );
       break;
     }
 
-    // ── MACRO ─────────────────────────────────────────────────────────────────
+    // ── 3A: Liquidity Composite ──────────────────────────────────────────
     case "3A": {
       const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.composite ?? null), "Composite", ACCENT, 2.5);
-      addLine(x, raw.map((d: any) => d.m2        ?? null), "M2",        BLUE,  1, "dot");
-      addLine(x, raw.map((d: any) => d.rrp       ?? null), "RRP",       AMBER, 1, "dot");
-      break;
-    }
-    case "3B": {
-      const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.t10y2y ?? null), "10Y-2Y", AMBER, 2.5);
-      addLine(x, raw.map((d: any) => d.t10y3m ?? null), "10Y-3M", BLUE,  2);
-      shapes.push(hline(0, iref, "Inversion", RED + "99"));
-      break;
-    }
-    case "3C": {
-      const x = raw.map((d: any) => d.date);
-      addLine(x, raw.map((d: any) => d.hyOAS  ?? null), "HY OAS",  RED,  2.5);
-      addLine(x, raw.map((d: any) => d.bbbOAS ?? null), "BBB OAS", AMBER, 2);
-      break;
-    }
-    case "3F": {
-      const x = raw.map((d: any) => d.date);
-      traces.push({
-        type: "scatter", mode: "lines",
-        x, y: raw.map((d: any) => d.value ?? null),
-        name: "XLE/SPY Ratio", yaxis: iref,
-        fill: "tozeroy", fillcolor: AMBER + "22",
-        line: { color: AMBER, width: 2 },
-        hovertemplate: "XLE/SPY: %{y:.4f}<extra></extra>",
-      } as any);
+      const yComp = raw.map((d: any) => d.composite ?? null);
+      traces.push(
+        { type: "scatter", mode: "lines", x, y: yComp,
+          name: "Composite", yaxis: "y2", line: { color: "#38bdf8", width: 2 },
+          hovertemplate: "Composite: %{y:.3f}<extra></extra>" },
+        { type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.m2 ?? null),
+          name: "M2", yaxis: "y2", line: { color: "#eab308", width: 1, dash: "dot" },
+          hovertemplate: "M2: %{y:.3f}<extra></extra>" },
+        { type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.rrp ?? null),
+          name: "RRP", yaxis: "y2", line: { color: "#a855f7", width: 1, dash: "dot" },
+          hovertemplate: "RRP: %{y:.3f}<extra></extra>" },
+      );
+      // Background regime zones
+      shapes.push(
+        { type: "rect", xref: "paper", yref: "y2", x0: 0, x1: 1, y0: 0.67, y1: 1.5,  fillcolor: "rgba(34,197,94,0.08)",  line: { width: 0 }, layer: "below" },
+        { type: "rect", xref: "paper", yref: "y2", x0: 0, x1: 1, y0: 0.33, y1: 0.67, fillcolor: "rgba(234,179,8,0.06)",  line: { width: 0 }, layer: "below" },
+        { type: "rect", xref: "paper", yref: "y2", x0: 0, x1: 1, y0: -0.5, y1: 0.33, fillcolor: "rgba(239,68,68,0.08)",  line: { width: 0 }, layer: "below" },
+        refLine(0.67, "y2", "#334155"), refLine(0.33, "y2", "#334155"),
+      );
+      annots.push(
+        rightAnnot("LOOSE",   0.84, "y2", "#22c55e"),
+        rightAnnot("NEUTRAL", 0.50, "y2", "#eab308"),
+        rightAnnot("TIGHT",   0.16, "y2", "#ef4444"),
+      );
+      // Current regime annotation top-right
+      const lastVal = yComp.filter((v: any) => v != null).slice(-1)[0];
+      if (lastVal != null) {
+        const regimeLabel = lastVal > 0.67 ? "LOOSE" : lastVal > 0.33 ? "NEUTRAL" : "TIGHT";
+        const regimeColor = lastVal > 0.67 ? "#22c55e" : lastVal > 0.33 ? "#eab308" : "#ef4444";
+        annots.push({
+          xref: "paper", yref: "paper", x: 0.99, y: 0.99,
+          xanchor: "right", yanchor: "top",
+          text: `<b>${regimeLabel}</b> ${lastVal.toFixed(2)}`,
+          showarrow: false,
+          font: { family: FONT, size: 14, color: regimeColor },
+          bgcolor: "rgba(6,11,20,0.7)", bordercolor: regimeColor, borderwidth: 1, borderpad: 4,
+        });
+      }
       break;
     }
 
-    // ── TECHNICAL ─────────────────────────────────────────────────────────────
+    // ── 3B: Yield Curve ─────────────────────────────────────────────────────
+    case "3B": {
+      const x     = raw.map((d: any) => d.date);
+      const y2y   = raw.map((d: any) => d.t10y2y ?? null);
+      const y3m   = raw.map((d: any) => d.t10y3m ?? null);
+      traces.push(
+        { type: "scatter", mode: "lines", x, y: y2y, name: "10Y-2Y", yaxis: "y2",
+          line: { color: "#38bdf8", width: 1.5 }, hovertemplate: "10Y-2Y: %{y:.2f}%<extra></extra>" },
+        { type: "scatter", mode: "lines", x, y: y3m, name: "10Y-3M", yaxis: "y2",
+          line: { color: "#eab308", width: 1.5 }, hovertemplate: "10Y-3M: %{y:.2f}%<extra></extra>" },
+      );
+      shapes.push({ ...refLine(0, "y2", "#475569", 1.5, "solid") });
+      // Background shading: both below 0 = red, both above 0 = green
+      for (let i = 1; i < raw.length; i++) {
+        const a2 = raw[i].t10y2y ?? null; const b2 = raw[i-1].t10y2y ?? null;
+        const a3 = raw[i].t10y3m ?? null; const b3 = raw[i-1].t10y3m ?? null;
+        if (a2 == null || a3 == null) continue;
+        const color = (a2 < 0 && a3 < 0) ? "rgba(239,68,68,0.08)"
+          : (a2 > 0 && a3 > 0) ? "rgba(34,197,94,0.06)" : null;
+        if (color) {
+          shapes.push({ type: "rect", xref: "x", yref: "paper",
+            x0: raw[i-1].date, x1: raw[i].date,
+            y0: hasPricePane ? IND_DOMAIN_SPLIT[0] : 0, y1: 1,
+            fillcolor: color, line: { width: 0 }, layer: "below" });
+        }
+      }
+      break;
+    }
+
+    // ── 3C: Credit Spreads ────────────────────────────────────────────────
+    case "3C": {
+      const x = raw.map((d: any) => d.date);
+      traces.push(
+        { type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.hyOAS  ?? null),
+          name: "HY OAS", yaxis: "y2", line: { color: "#38bdf8", width: 1.5 },
+          hovertemplate: "HY OAS: %{y:.2f}%<extra></extra>" },
+        { type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.bbbOAS ?? null),
+          name: "BBB OAS", yaxis: "y2", line: { color: "#eab308", width: 1.5 },
+          hovertemplate: "BBB OAS: %{y:.2f}%<extra></extra>" },
+      );
+      break;
+    }
+
+    // ── 3F: Ratio chart ─────────────────────────────────────────────────────
+    case "3F": {
+      const x = raw.map((d: any) => d.date);
+      traces.push({ type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.value ?? null),
+        name: "XLE/SPY", yaxis: "y2",
+        line: { color: "#eab308", width: 1.5 },
+        fill: "tozeroy", fillcolor: "rgba(234,179,8,0.06)",
+        hovertemplate: "XLE/SPY: %{y:.4f}<extra></extra>" });
+      break;
+    }
+
+    // ── 4A: Trend Power Oscillator ─────────────────────────────────────────
     case "4A": {
       const x = raw.map((d: any) => d.date);
       const y = raw.map((d: any) => d.value ?? null);
-      const barColors = raw.map((d: any) => {
-        const v = d.value ?? 0;
-        return v >= 0.5 ? GREEN + "cc" : v <= -0.5 ? RED + "cc" : AMBER + "cc";
-      });
-      addBar(x, y, "Trend Power Osc", barColors);
-      shapes.push(hline(0, iref, "0", REFLINE));
+      traces.push({ type: "bar", x, y, name: "Trend Power", yaxis: "y2",
+        marker: { color: y.map((v: any) => {
+          const n = v ?? 0;
+          return n >= 0.5 ? "rgba(34,197,94,0.8)" : n <= -0.5 ? "rgba(239,68,68,0.8)" : "rgba(234,179,8,0.8)";
+        })},
+        hovertemplate: "TPO: %{y:.3f}<extra></extra>" });
+      shapes.push(refLine(0, "y2", "#1e3a5f", 1.5, "solid"));
       break;
     }
+
+    // ── 4B: DSI Proxy ──────────────────────────────────────────────────────────
     case "4B": {
       const x = raw.map((d: any) => d.date);
-      traces.push({
-        type: "scatter", mode: "lines",
-        x, y: raw.map((d: any) => d.value ?? null),
-        name: "DSI Proxy", yaxis: iref,
-        fill: "tozeroy", fillcolor: BLUE + "22",
-        line: { color: BLUE, width: 2.5 },
-        hovertemplate: "DSI: %{y:.1f}<extra></extra>",
-      } as any);
+      const y = raw.map((d: any) => d.value ?? null);
+      traces.push({ type: "scatter", mode: "lines", x, y,
+        name: "DSI Proxy", yaxis: "y2",
+        line: { color: "#eab308", width: 1.5 },
+        hovertemplate: "DSI: %{y:.1f}<extra></extra>" });
       shapes.push(
-        hline(80, iref, "Extreme Bull", RED   + "99"),
-        hline(20, iref, "Extreme Bear", GREEN + "99"),
-        hline(50, iref, "Neutral",       REFLINE),
+        refLine(80, "y2", "#475569", 1, "dash"),
+        refLine(20, "y2", "#475569", 1, "dash"),
+        refLine(50, "y2"),
       );
+      annots.push(
+        rightAnnot("OB 80", 80, "y2", "#475569", "bottom"),
+        rightAnnot("OS 20", 20, "y2", "#475569", "top"),
+      );
+      // Buy signal circles: every cross below 20 → mark on price pane
+      if (hasPricePane && priceData) {
+        const priceMap = new Map(filterDates(priceData, tf).map((b: any) => [b.date, b.close]));
+        const sigDates: string[] = []; const sigPrices: number[] = [];
+        for (let i = 1; i < raw.length; i++) {
+          if ((raw[i-1].value ?? 100) >= 20 && (raw[i].value ?? 100) < 20) {
+            const p = priceMap.get(raw[i].date);
+            if (p != null) { sigDates.push(raw[i].date); sigPrices.push(p); }
+          }
+        }
+        if (sigDates.length) {
+          traces.push({ type: "scatter", mode: "markers", x: sigDates, y: sigPrices,
+            name: "DSI Buy", yaxis: "y1",
+            marker: { symbol: "circle", color: "#22c55e", size: 8, line: { color: "#22c55e", width: 1 } },
+            hovertemplate: "DSI BUY: %{y:.2f}<extra></extra>" });
+        }
+      }
       break;
     }
+
+    // ── 4D: ATR Extension ──────────────────────────────────────────────────
     case "4D": {
       const x = raw.map((d: any) => d.date);
-      traces.push({
-        type: "scatter", mode: "lines",
-        x, y: raw.map((d: any) => d.pctExtension ?? null),
-        name: "ATR % Extension", yaxis: iref,
-        fill: "tozeroy", fillcolor: AMBER + "22",
-        line: { color: AMBER, width: 2.5 },
-        hovertemplate: "ATR Ext: %{y:.2f}<extra></extra>",
-      } as any);
+      traces.push({ type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.pctExtension ?? null),
+        name: "ATR Extension", yaxis: "y2",
+        line: { color: "#eab308", width: 1.5 },
+        fill: "tozeroy", fillcolor: "rgba(234,179,8,0.06)",
+        hovertemplate: "ATR Ext: %{y:.2f}<extra></extra>" });
       shapes.push(
-        hline( 2, iref, "+2 ATR",  RED   + "99"),
-        hline(-2, iref, "-2 ATR",  GREEN + "99"),
-        hline( 0, iref, "0",        REFLINE),
+        refLine( 2, "y2", "#ef4444", 1, "dash"),
+        refLine(-2, "y2", "#22c55e", 1, "dash"),
+        refLine( 0, "y2", "#1e3a5f", 1, "solid"),
+      );
+      annots.push(
+        rightAnnot("+2 ATR", 2,  "y2", "#ef4444", "bottom"),
+        rightAnnot("-2 ATR", -2, "y2", "#22c55e", "top"),
       );
       break;
     }
+
+    // ── 4E: Relative Strength ───────────────────────────────────────────────
     case "4E": {
       const x = raw.map((d: any) => d.date);
-      traces.push({
-        type: "scatter", mode: "lines",
-        x, y: raw.map((d: any) => d.value ?? null),
-        name: `${activeTicker}/SPY`, yaxis: iref,
-        fill: "tozeroy", fillcolor: PURPLE + "22",
-        line: { color: PURPLE, width: 2.5 },
-        hovertemplate: "RS: %{y:.4f}<extra></extra>",
-      } as any);
+      traces.push({ type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.value ?? null),
+        name: `${activeTicker}/SPY`, yaxis: "y2",
+        line: { color: "#a855f7", width: 1.5 },
+        fill: "tozeroy", fillcolor: "rgba(168,85,247,0.06)",
+        hovertemplate: "RS: %{y:.4f}<extra></extra>" });
       break;
     }
 
     default: {
-      // Generic fallback
       const x = raw.map((d: any) => d.date);
       if (raw.length > 0 && raw[0].value !== undefined) {
-        addLine(x, raw.map((d: any) => d.value ?? null), def.label, BLUE);
+        traces.push({ type: "scatter", mode: "lines", x, y: raw.map((d: any) => d.value ?? null),
+          name: def.label, yaxis: "y2", line: { color: "#38bdf8", width: 1.5 },
+          hovertemplate: `${def.label}: %{y:.3f}<extra></extra>` });
       }
     }
   }
 
-  // ── Build layout ─────────────────────────────────────────────────────────
-  const layout: Partial<Plotly.Layout> = {
-    ...baseLayout(),
-    margin: { l: 52, r: 60, t: 8, b: 40 },
-    shapes: shapes as any,
-    ...(hasPricePane ? {
-      // Toggle open: indicator top 65%, price bottom 35%
-      yaxis: {
-        ...axisStyle(),
-        domain: priceDomain,
-        title: { text: activeTicker, font: { size: 9, color: AXIS_CLR, family: FONT } },
-      },
-      yaxis2: {
-        ...axisStyle(),
-        domain: indDomain,
-      },
-      xaxis: {
-        ...axisStyle(),
-        anchor: "y2",
-        matches: "x",
-      },
-    } : {
-      // Default: indicator fills full height
-      yaxis2: {
-        ...axisStyle(),
-        domain: indDomain,
-      },
-      xaxis: { ...axisStyle(), anchor: "y2" },
-    }),
-  } as any;
-
-  return { data: traces, layout };
+  return { data: traces, layout: dualLayout(shapes, annots) };
 }
 
 // ─── ChartPanel component ─────────────────────────────────────────────────────
