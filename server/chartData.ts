@@ -1,11 +1,24 @@
 /**
  * chartData.ts — Chart Engine data layer
- * All FRED calls use real API key. All Yahoo Finance OHLCV via yfinance-style URL.
- * McClellan / breadth computed from sector ETF A-D proxies (best free approach).
+ *
+ * Provider-agnostic OHLCV fetching. Set environment variables to switch:
+ *   DATA_PROVIDER=polygon   → uses Polygon.io (reliable, 15-min delayed on free tier)
+ *   DATA_PROVIDER=yahoo     → uses Yahoo Finance (unofficial, free, occasionally flaky)
+ *   POLYGON_API_KEY=xxx     → required when DATA_PROVIDER=polygon
+ *
+ * Default: polygon if POLYGON_API_KEY is set, otherwise yahoo.
+ *
+ * FRED data is always used for macro series — unaffected by provider switch.
  */
 import axios from "axios";
 
-const FRED_KEY = "9c1ea0c6ace2cad8f356ff321919313c";
+const FRED_KEY    = "9c1ea0c6ace2cad8f356ff321919313c";
+const POLYGON_KEY = process.env.POLYGON_API_KEY ?? "";
+const PROVIDER: "polygon" | "yahoo" =
+  (process.env.DATA_PROVIDER as any) ??
+  (POLYGON_KEY ? "polygon" : "yahoo");
+
+console.log(`[chartData] OHLCV provider: ${PROVIDER}`);
 
 // ── Simple in-memory cache ────────────────────────────────────────────────────
 const _cache: Record<string, { ts: number; data: any }> = {};
@@ -17,9 +30,59 @@ function sc(k: string, d: any) { _cache[k] = { ts: Date.now(), data: d }; }
 export interface Bar { date: string; open: number; high: number; low: number; close: number; volume: number; }
 interface COTPoint { date: string; largeSpecNet: number; assetMgrNet: number; dealerNet: number; openInterest: number; }
 
-// ── Yahoo Finance OHLCV ───────────────────────────────────────────────────────
-export async function fetchOHLCV(ticker: string, range = "10y"): Promise<Bar[]> {
-  const key = `ohlcv_${ticker}_${range}`;
+// ─────────────────────────────────────────────────────────────────────────────
+// OHLCV — provider implementations
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Polygon.io: fetch adjusted daily OHLCV for `ticker` going back `years` years.
+ * Free tier: 15-min delayed, unlimited calls.
+ * Docs: https://polygon.io/docs/stocks/get_v2_aggs_ticker__stocksticker__range__multiplier___timespan___from___to
+ */
+async function fetchPolygon(ticker: string, years = 10): Promise<Bar[]> {
+  const key = `poly_${ticker}_${years}`;
+  const cached = gc(key); if (cached) return cached;
+  try {
+    const to   = new Date();
+    const from = new Date(Date.now() - years * 365.25 * 86400 * 1000);
+    const fmt  = (d: Date) => d.toISOString().slice(0, 10);
+
+    // Polygon uses a ticker format that differs slightly for some assets
+    // (BTC-USD → X:BTCUSD, etc.) — handle common cases
+    const polyTicker = ticker === "BTC-USD" ? "X:BTCUSD"
+      : ticker === "ETH-USD" ? "X:ETHUSD"
+      : ticker;
+
+    const url = `https://api.polygon.io/v2/aggs/ticker/${polyTicker}/range/1/day/${fmt(from)}/${fmt(to)}` +
+      `?adjusted=true&sort=asc&limit=50000&apiKey=${POLYGON_KEY}`;
+
+    const r = await axios.get(url, { timeout: 20000 });
+    const results: any[] = r.data?.results ?? [];
+    if (!results.length) return [];
+
+    const bars: Bar[] = results.map((d: any) => ({
+      date:   new Date(d.t).toISOString().slice(0, 10),
+      open:   d.o,
+      high:   d.h,
+      low:    d.l,
+      close:  d.c,
+      volume: d.v ?? 0,
+    })).filter(b => b.close != null && b.date);
+
+    sc(key, bars);
+    return bars;
+  } catch (e: any) {
+    console.error(`[chartData] Polygon fetch failed for ${ticker}:`, e?.response?.data ?? e?.message);
+    return [];
+  }
+}
+
+/**
+ * Yahoo Finance: unofficial v8 chart endpoint.
+ * Free, no key required, but can break without warning.
+ */
+async function fetchYahoo(ticker: string, range = "10y"): Promise<Bar[]> {
+  const key = `yahoo_${ticker}_${range}`;
   const cached = gc(key); if (cached) return cached;
   try {
     const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(ticker)}?interval=1d&range=${range}`;
@@ -29,15 +92,28 @@ export async function fetchOHLCV(ticker: string, range = "10y"): Promise<Bar[]> 
     const ts: number[] = res.timestamps ?? res.timestamp ?? [];
     const q = res.indicators?.quote?.[0] ?? {};
     const bars: Bar[] = ts.map((t: number, i: number) => ({
-      date: new Date(t * 1000).toISOString().slice(0, 10),
-      open: q.open?.[i] ?? null,
-      high: q.high?.[i] ?? null,
-      low: q.low?.[i] ?? null,
-      close: q.close?.[i] ?? null,
+      date:   new Date(t * 1000).toISOString().slice(0, 10),
+      open:   q.open?.[i]   ?? null,
+      high:   q.high?.[i]   ?? null,
+      low:    q.low?.[i]    ?? null,
+      close:  q.close?.[i]  ?? null,
       volume: q.volume?.[i] ?? 0,
     })).filter(b => b.close != null && b.date);
-    sc(key, bars); return bars;
-  } catch { return []; }
+    sc(key, bars);
+    return bars;
+  } catch (e: any) {
+    console.error(`[chartData] Yahoo fetch failed for ${ticker}:`, e?.message);
+    return [];
+  }
+}
+
+/**
+ * Main entry point — routes to the active provider.
+ * All other functions in this file call fetchOHLCV; nothing else changes.
+ */
+export async function fetchOHLCV(ticker: string, _rangeHint = "10y"): Promise<Bar[]> {
+  if (PROVIDER === "polygon") return fetchPolygon(ticker);
+  return fetchYahoo(ticker, _rangeHint);
 }
 
 // ── FRED single series ────────────────────────────────────────────────────────
@@ -85,7 +161,6 @@ async function fetchCOT(contract: string): Promise<COTPoint[]> {
 export async function getCOTData(contract: string) { return fetchCOT(contract); }
 
 // ── Breadth — computed from 11 SPDR sector ETFs ───────────────────────────────
-// Best free approach: compute breadth indicators across 11 sector ETFs
 const SECTOR_ETFS = ["XLK","XLF","XLE","XLV","XLI","XLY","XLP","XLU","XLB","XLRE","XLC"];
 
 async function fetchAllSectors(): Promise<Record<string, Bar[]>> {
@@ -94,7 +169,6 @@ async function fetchAllSectors(): Promise<Record<string, Bar[]>> {
 }
 
 function getAlignedDates(sectors: Record<string, Bar[]>): string[] {
-  // Use union of all dates, sorted
   const allDates = new Set<string>();
   Object.values(sectors).forEach(bars => bars.forEach(b => allDates.add(b.date)));
   return [...allDates].sort();
@@ -203,8 +277,6 @@ export async function getBreadthData(indicator: string) {
     }).filter(Boolean);
 
   } else if (indicator === "mcclellan") {
-    // McClellan using advancing/declining sectors as proxy
-    // Advance = sectors up on day, Decline = sectors down on day
     const advDecRatios: number[] = [];
     const mcclellanDates: string[] = [];
 
@@ -235,7 +307,6 @@ export async function getBreadthData(indicator: string) {
     }).filter(d => d.value != null);
 
   } else if (indicator === "rsi_breadth") {
-    // For each date: median RSI across all sectors, + pct overbought (>70) / oversold (<30)
     const sectorRSIs: (number|null)[][] = sectorBars.map(bars => {
       const closes = bars.map(b => b.close);
       return calcRSI(closes, 14);
@@ -277,8 +348,6 @@ export async function getBreadthData(indicator: string) {
     }).filter(Boolean);
 
   } else if (indicator === "zweig") {
-    // Zweig Breadth Thrust: 10-day EMA of (Adv / (Adv+Dec)) ratio
-    // Thrust signal when crosses from <0.40 to >0.615 within 10 days
     const advRatios: number[] = [];
     const zwDates: string[] = [];
 
@@ -302,7 +371,6 @@ export async function getBreadthData(indicator: string) {
     })).filter(d => d.value != null);
 
   } else if (indicator === "ad_line") {
-    // Cumulative A-D line
     let cumulative = 0;
     const adDates: string[] = [];
     const adValues: number[] = [];
@@ -332,21 +400,18 @@ export async function getMacroData(series: string) {
 }
 
 // ── Liquidity Composite ───────────────────────────────────────────────────────
-// Components: Fed Balance Sheet (WALCL), M2 (M2SL), RRP (RRPONTSYD),
-//             Bank Reserves (WRESBAL), TGA (WDTGAL), HY Spreads inverted (BAMLH0A0HYM2)
 export async function getLiquidityComposite() {
   const key = "liquidity_composite"; const cached = gc(key); if (cached) return cached;
   try {
     const [walcl, m2, rrp, reserves, tga, hy] = await Promise.all([
-      fetchFRED("WALCL"),       // Fed assets $M
-      fetchFRED("M2SL"),        // M2 $B
-      fetchFRED("RRPONTSYD"),   // RRP overnight $B
-      fetchFRED("WRESBAL"),     // Bank reserves $M
-      fetchFRED("WDTGAL"),      // TGA $M
-      fetchFRED("BAMLH0A0HYM2"),// HY OAS %
+      fetchFRED("WALCL"),
+      fetchFRED("M2SL"),
+      fetchFRED("RRPONTSYD"),
+      fetchFRED("WRESBAL"),
+      fetchFRED("WDTGAL"),
+      fetchFRED("BAMLH0A0HYM2"),
     ]);
 
-    // Align to weekly dates from WALCL
     function normalize(arr: { date: string; value: number }[]): Map<string, number> {
       if (!arr.length) return new Map();
       const min = Math.min(...arr.map(d => d.value));
@@ -356,13 +421,12 @@ export async function getLiquidityComposite() {
     }
 
     const nWalcl = normalize(walcl);
-    const nM2 = normalize(m2);
-    const nRrp = normalize(rrp);
-    const nRes = normalize(reserves);
-    const nTga = normalize(tga);
-    const nHy = normalize(hy); // inverted for liquidity
+    const nM2    = normalize(m2);
+    const nRrp   = normalize(rrp);
+    const nRes   = normalize(reserves);
+    const nTga   = normalize(tga);
+    const nHy    = normalize(hy);
 
-    // Fill forward for lower-frequency series
     function fillForward(map: Map<string, number>, dates: string[]): Map<string, number> {
       let last = 0;
       const out = new Map<string, number>();
@@ -374,20 +438,19 @@ export async function getLiquidityComposite() {
     }
 
     const allDates = [...new Set([...walcl, ...reserves].map(d => d.date))].sort();
-    const ffM2 = fillForward(nM2, allDates);
+    const ffM2  = fillForward(nM2,  allDates);
     const ffRrp = fillForward(nRrp, allDates);
     const ffTga = fillForward(nTga, allDates);
-    const ffHy = fillForward(nHy, allDates);
+    const ffHy  = fillForward(nHy,  allDates);
 
     const data = allDates.map(date => {
-      const w = nWalcl.get(date);
-      const m = ffM2.get(date) ?? 0;
-      const r = ffRrp.get(date) ?? 0;
+      const w   = nWalcl.get(date);
+      const m   = ffM2.get(date) ?? 0;
+      const r   = ffRrp.get(date) ?? 0;
       const res = nRes.get(date);
-      const t = ffTga.get(date) ?? 0;
-      const h = ffHy.get(date) ?? 0;
+      const t   = ffTga.get(date) ?? 0;
+      const h   = ffHy.get(date) ?? 0;
       if (w == null && res == null) return null;
-      // Fed BS + M2 + Reserves - RRP - TGA - HY_spread (higher spreads = less liquidity)
       const composite = ((w ?? 0) + m + (res ?? 0) - r * 0.5 - t * 0.3 - h * 0.5) / 3;
       return {
         date,
@@ -426,8 +489,8 @@ export async function getCreditSpreads() {
   const key = "credit_spreads"; const cached = gc(key); if (cached) return cached;
   try {
     const [hy, bbb] = await Promise.all([
-      fetchFRED("BAMLH0A0HYM2"),    // ICE BofA HY OAS
-      fetchFRED("BAMLC0A4CBBB"),    // ICE BofA BBB OAS
+      fetchFRED("BAMLH0A0HYM2"),
+      fetchFRED("BAMLC0A4CBBB"),
     ]);
     const mapBBB = new Map(bbb.map(d => [d.date, d.value]));
     const data = hy.map(d => ({
@@ -448,19 +511,15 @@ export async function getFedBalanceSheet() {
       fetchOHLCV("SPY"),
     ]);
     const spyMap = new Map(spy.map(b => [b.date, b.close]));
-
-    // Fill SPY forward for weekly WALCL dates
     let lastSPY = 0;
-    const allSpyDates = spy.map(b => b.date).sort();
 
     const data = fedBS.map(d => {
-      // Find closest SPY price on or before this date
       const spyClose = spyMap.get(d.date) ??
         spy.filter(b => b.date <= d.date).slice(-1)[0]?.close ?? null;
       if (spyClose) lastSPY = spyClose;
       return {
         date: d.date,
-        fedBS: parseFloat((d.value / 1000).toFixed(1)), // convert to $B
+        fedBS: parseFloat((d.value / 1000).toFixed(1)),
         spyClose: spyClose ?? lastSPY,
       };
     });
@@ -468,7 +527,7 @@ export async function getFedBalanceSheet() {
   } catch { return []; }
 }
 
-// ── Sector Rotation (RS × Momentum scatter) ───────────────────────────────────
+// ── Sector Rotation ───────────────────────────────────────────────────────────
 export async function getSectorRotation() {
   const key = "sector_rotation"; const cached = gc(key); if (cached) return cached;
   try {
@@ -483,12 +542,10 @@ export async function getSectorRotation() {
       const recent = bars.slice(-65);
       const spy = spyBars.slice(-65);
 
-      // RS: 20-day performance relative to SPY
       const secPerf20 = (recent.slice(-1)[0].close - recent.slice(-21)[0].close) / recent.slice(-21)[0].close * 100;
       const spyPerf20 = spy.length >= 21 ? (spy.slice(-1)[0].close - spy.slice(-21)[0].close) / spy.slice(-21)[0].close * 100 : 0;
       const rs = parseFloat((secPerf20 - spyPerf20).toFixed(2));
 
-      // Momentum: rate of change of RS over last 4 weeks
       const secPerf5 = (recent.slice(-1)[0].close - recent.slice(-6)[0].close) / recent.slice(-6)[0].close * 100;
       const spyPerf5 = spy.length >= 6 ? (spy.slice(-1)[0].close - spy.slice(-6)[0].close) / spy.slice(-6)[0].close * 100 : 0;
       const momentum = parseFloat((secPerf5 - spyPerf5).toFixed(2));
@@ -500,7 +557,7 @@ export async function getSectorRotation() {
   } catch { return []; }
 }
 
-// ── Ratio chart (ticker / benchmark) ─────────────────────────────────────────
+// ── Ratio chart ───────────────────────────────────────────────────────────────
 export async function getRatioData(ticker: string, benchmark: string) {
   const key = `ratio_${ticker}_${benchmark}`; const cached = gc(key); if (cached) return cached;
   try {
@@ -513,29 +570,25 @@ export async function getRatioData(ticker: string, benchmark: string) {
   } catch { return []; }
 }
 
-// ── CTA Positioning Model ─────────────────────────────────────────────────────
-// Derived from SPY trend-following signals: position = f(SMA crossovers, momentum z-score)
+// ── CTA Model ─────────────────────────────────────────────────────────────────
 export async function getCTAModel() {
   const key = "cta_model"; const cached = gc(key); if (cached) return cached;
   try {
     const bars = await fetchOHLCV("SPY");
     if (bars.length < 200) return [];
     const closes = bars.map(b => b.close);
-    const sma50 = sma(closes, 50);
+    const sma50  = sma(closes, 50);
     const sma200 = sma(closes, 200);
-    const sma20 = sma(closes, 20);
+    const sma20  = sma(closes, 20);
 
-    // Rolling 63-day z-score of returns
     const returns = closes.map((c, i) => i > 0 ? (c - closes[i-1]) / closes[i-1] : 0);
 
     const data = bars.map((b, i) => {
       if (sma50[i] == null || sma200[i] == null || sma20[i] == null || i < 63) return null;
-      // Score: SMA trend alignment + momentum
       const trendScore = (closes[i] > (sma50[i] as number) ? 0.33 : -0.33)
         + ((sma50[i] as number) > (sma200[i] as number) ? 0.33 : -0.33)
         + (closes[i] > (sma20[i] as number) ? 0.33 : -0.33);
 
-      // 63-day return z-score
       const window = returns.slice(i - 62, i + 1);
       const mean = window.reduce((a, b) => a + b, 0) / window.length;
       const std = Math.sqrt(window.reduce((a, b) => a + (b - mean) ** 2, 0) / window.length) || 0.0001;
@@ -550,25 +603,23 @@ export async function getCTAModel() {
 }
 
 // ── Trend Power Oscillator ────────────────────────────────────────────────────
-// From macrocharts: composite of trend strength + momentum
 export async function getTrendPower(ticker: string) {
   const key = `tpo_${ticker}`; const cached = gc(key); if (cached) return cached;
   try {
     const bars = await fetchOHLCV(ticker);
     if (bars.length < 50) return [];
     const closes = bars.map(b => b.close);
-    const rsi14 = calcRSI(closes, 14);
+    const rsi14   = calcRSI(closes, 14);
     const sma20arr = sma(closes, 20);
     const sma50arr = sma(closes, 50);
 
-    // TPO = RSI z-score × trend direction composite
     const rsiVals = rsi14.filter(v => v != null) as number[];
     const rsiMean = rsiVals.length ? rsiVals.reduce((a, b) => a + b, 0) / rsiVals.length : 50;
-    const rsiStd = rsiVals.length ? Math.sqrt(rsiVals.reduce((a, b) => a + (b - rsiMean) ** 2, 0) / rsiVals.length) : 10;
+    const rsiStd  = rsiVals.length ? Math.sqrt(rsiVals.reduce((a, b) => a + (b - rsiMean) ** 2, 0) / rsiVals.length) : 10;
 
     const data = bars.map((b, i) => {
       if (rsi14[i] == null || sma20arr[i] == null || sma50arr[i] == null) return null;
-      const rsiZ = ((rsi14[i] as number) - rsiMean) / (rsiStd || 1);
+      const rsiZ  = ((rsi14[i] as number) - rsiMean) / (rsiStd || 1);
       const trend = (closes[i] > (sma20arr[i] as number) ? 0.5 : -0.5)
         + ((sma20arr[i] as number) > (sma50arr[i] as number) ? 0.5 : -0.5);
       const tpo = parseFloat((rsiZ * 0.6 + trend * 0.4).toFixed(4));
@@ -579,9 +630,7 @@ export async function getTrendPower(ticker: string) {
   } catch { return []; }
 }
 
-// ── DSI Proxy (Daily Sentiment Index) ─────────────────────────────────────────
-// DSI is proprietary (Trade-Futures.com). Best free proxy:
-// Short-term RSI mapped 0-100 with mean-reversion characteristics
+// ── DSI Proxy ─────────────────────────────────────────────────────────────────
 export async function getDSI(ticker: string) {
   const key = `dsi_${ticker}`; const cached = gc(key); if (cached) return cached;
   try {
@@ -589,8 +638,7 @@ export async function getDSI(ticker: string) {
     if (bars.length < 20) return [];
     const closes = bars.map(b => b.close);
 
-    // DSI proxy: 5-day RSI smoothed with 3-day EMA, mapped to 0-100
-    const rsi5 = calcRSI(closes, 5);
+    const rsi5    = calcRSI(closes, 5);
     const rsi5vals = rsi5.map(v => v ?? NaN);
     const smoothed = ema(rsi5vals, 3);
 
@@ -611,14 +659,12 @@ export async function getATRExtension(ticker: string) {
     if (bars.length < 20) return [];
     const period = 14;
 
-    // True Range
     const tr = bars.map((b, i) => {
       if (i === 0) return b.high - b.low;
       const prev = bars[i - 1].close;
       return Math.max(b.high - b.low, Math.abs(b.high - prev), Math.abs(b.low - prev));
     });
 
-    // ATR (Wilder smoothing)
     const atr: (number | null)[] = new Array(bars.length).fill(null);
     let atrVal = tr.slice(0, period).reduce((a, b) => a + b, 0) / period;
     atr[period - 1] = atrVal;
@@ -627,7 +673,6 @@ export async function getATRExtension(ticker: string) {
       atr[i] = atrVal;
     }
 
-    // SMA20 as baseline
     const sma20arr = sma(bars.map(b => b.close), 20);
 
     const data = bars.map((b, i) => {
@@ -651,8 +696,7 @@ export async function getSPYVolume() {
   const key = "spy_volume"; const cached = gc(key); if (cached) return cached;
   try {
     const bars = await fetchOHLCV("SPY");
-    // Compute 20-day average volume for reference line
-    const vols = bars.map(b => b.volume);
+    const vols  = bars.map(b => b.volume);
     const avgVol = sma(vols, 20);
     const data = bars.map((b, i) => ({
       date: b.date,
@@ -664,17 +708,15 @@ export async function getSPYVolume() {
   } catch { return []; }
 }
 
-// ── Speculative Options Volume (UVXY/SVXY ratio as fear proxy) ────────────────
+// ── Speculative Vol ───────────────────────────────────────────────────────────
 export async function getSpeculativeVolume() {
   const key = "spec_vol"; const cached = gc(key); if (cached) return cached;
   try {
-    // Use VIX vs its 20d SMA as a cleaner fear/greed proxy
-    // VIXCLS from FRED is daily
     const [vixFred, spy] = await Promise.all([
       fetchFRED("VIXCLS"),
       fetchOHLCV("SPY"),
     ]);
-    const spyMap = new Map(spy.map(b => [b.date, b.close]));
+    const spyMap  = new Map(spy.map(b => [b.date, b.close]));
     const vixVals = vixFred.map(d => d.value);
     const vixSMA20 = sma(vixVals, 20);
     const data = vixFred.map((d, i) => ({
@@ -687,10 +729,7 @@ export async function getSpeculativeVolume() {
   } catch { return []; }
 }
 
-// ── AAII Sentiment (via manual CSV parsing) ───────────────────────────────────
-// AAII blocks direct downloads; use FRED proxy: no AAII series there.
-// Best free: scrape their public weekly data page or use static fallback.
-// We'll compute a synthetic fear/greed from: VIX percentile + CTA score + credit spreads
+// ── Market Sentiment Composite ────────────────────────────────────────────────
 export async function getMarketSentimentComposite() {
   const key = "sentiment_composite"; const cached = gc(key); if (cached) return cached;
   try {
@@ -700,21 +739,18 @@ export async function getMarketSentimentComposite() {
       fetchOHLCV("SPY"),
     ]);
 
-    // Rolling percentile rank of VIX (252-day window)
     const vixRank = vix.map((d, i) => {
       const window = vix.slice(Math.max(0, i - 251), i + 1).map(x => x.value);
-      const rank = window.filter(v => v <= d.value).length / window.length;
-      return rank;
+      return window.filter(v => v <= d.value).length / window.length;
     });
 
-    const hyMap = new Map(hy.map(d => [d.date, d.value]));
+    const hyMap  = new Map(hy.map(d => [d.date, d.value]));
     const spyMap = new Map(spy.map(b => [b.date, b.close]));
 
     const data = vix.map((d, i) => {
-      const vixPct = vixRank[i]; // high = fearful
+      const vixPct    = vixRank[i];
       const hyCurrent = hyMap.get(d.date) ?? 4;
-      const hyPct = hy.filter(h => h.value <= hyCurrent).length / hy.length;
-      // Sentiment = inverted fear: low VIX + low spreads = high sentiment
+      const hyPct     = hy.filter(h => h.value <= hyCurrent).length / hy.length;
       const sentScore = parseFloat(((1 - vixPct * 0.6 - hyPct * 0.4) * 100).toFixed(1));
       return {
         date: d.date,
