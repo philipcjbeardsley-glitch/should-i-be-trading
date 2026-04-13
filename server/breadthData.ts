@@ -62,7 +62,7 @@ export async function fetchBreadthData() {
   if (cached) return cached;
 
   const allCharts = await Promise.all(
-    BREADTH_SYMBOLS.map(s => fetchYahooChart(s, "6mo").then(d => ({ symbol: s, data: d })))
+    BREADTH_SYMBOLS.map(s => fetchYahooChart(s, "1y").then(d => ({ symbol: s, data: d })))
   );
 
   const chartMap: Record<string, ReturnType<typeof getOHLC>> = {};
@@ -196,7 +196,7 @@ export async function fetchBreadthData() {
   // ── Build main rows ──────────────────────────────────────────────────────
   const rows: any[] = [];
 
-  for (let i = nDates - 1; i >= 1 && rows.length < 30; i--) {
+  for (let i = nDates - 1; i >= 1 && rows.length < 65; i--) {
     const date = allDates[i];
     const spyClose = spy.closes[i];
     const spyPrev = spy.closes[i - 1];
@@ -379,6 +379,41 @@ export async function fetchBreadthData() {
     };
   });
 
+
+  // ── Percentile rank computation (trailing 252-day window) ─────────────────
+  // For each numeric column, compute where today's value ranks in the history
+  const PCTILE_COLS = [
+    "oneDayRatio","fiveDayRatio","upVolPct","upVolMa10","netNewHighs","netNewHighsMa10",
+    "above5dma","above20dma","above50dma","above200dma",
+    "mcclellan","mclSummation","nhiloRatio","zbtVal","atrOverextended","atrWashout"
+  ] as const;
+
+  function percentileRank(arr: number[], val: number): number {
+    if (arr.length === 0) return 50;
+    const below = arr.filter(v => v < val).length;
+    return Math.round((below / arr.length) * 100);
+  }
+
+  // Build history arrays (rows are newest-first; use all available rows as history)
+  const colHistory: Record<string, number[]> = {};
+  for (const col of PCTILE_COLS) {
+    colHistory[col] = rows.map((rr: any) => {
+      const v = rr[col]?.value;
+      return typeof v === "number" ? v : parseFloat(v ?? "0");
+    }).filter((v: number) => !isNaN(v));
+  }
+
+  // Annotate each row with percentile ranks
+  for (const row of rows) {
+    for (const col of PCTILE_COLS) {
+      const rawVal = row[col]?.value;
+      const numVal = typeof rawVal === "number" ? rawVal : parseFloat(rawVal ?? "0");
+      if (row[col] && !isNaN(numVal)) {
+        row[col].pct = percentileRank(colHistory[col], numVal);
+      }
+    }
+  }
+
   // ── ZBT status for banner ────────────────────────────────────────────────
   const latestRow = rows[0] ?? {};
   const zbtStatus = latestRow.zbtVal ?? { value: 0, building: false, progress: 0, signal: false };
@@ -453,8 +488,8 @@ export async function fetchBreadthData() {
     headerSummary,
     composite: { score: compositeScore, trend5d, regimeSummary, scoreHistory },
     sectorBreadth,
-    adLine: adLine.slice(-60), // last 60 days for chart
-    mcLine: mcOsc.slice(-60).map((v, i2) => ({ date: allDates[nDates - 60 + i2] ?? "", osc: v, sum: mcSum[nDates - 60 + i2] ?? 0 })),
+    adLine: adLine.slice(-90), // last 60 days for chart
+    mcLine: mcOsc.slice(-90).map((v, i2) => ({ date: allDates[Math.max(0, nDates - 90) + i2] ?? "", osc: v, sum: mcSum[Math.max(0, nDates - 90) + i2] ?? 0 })),
     zbtStatus,
     timestamp: new Date().toISOString(),
   };
