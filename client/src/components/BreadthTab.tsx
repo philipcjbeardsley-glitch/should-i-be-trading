@@ -46,21 +46,7 @@ export default function BreadthTab() {
     staleTime: 30000,
   });
 
-  if (isLoading || !data) {
-    return (
-      <div style={{ padding: 12 }}>
-        <div className="panel">
-          {[...Array(15)].map((_, i) => (
-            <div key={i} className="skeleton" style={{ height: 28, marginBottom: 3 }} />
-          ))}
-        </div>
-      </div>
-    );
-  }
-
-  const { rows, headerSummary } = data;
-
-  // ATR Extended popover state
+  // ATR Extended popover state — must be before any early returns
   const [atrPopover, setAtrPopover] = useState<{ open: boolean; rowIndex: number; x: number; y: number }>({ open: false, rowIndex: -1, x: 0, y: 0 });
   const [atrData, setAtrData] = useState<{ tickers: any[]; count: number } | null>(null);
   const [atrLoading, setAtrLoading] = useState(false);
@@ -76,6 +62,20 @@ export default function BreadthTab() {
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [atrPopover.open]);
+
+  if (isLoading || !data) {
+    return (
+      <div style={{ padding: 12 }}>
+        <div className="panel">
+          {[...Array(15)].map((_, i) => (
+            <div key={i} className="skeleton" style={{ height: 28, marginBottom: 3 }} />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  const { rows, headerSummary } = data;
 
   async function handleAtrClick(rowIndex: number, e: React.MouseEvent) {
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
