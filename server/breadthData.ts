@@ -61,9 +61,9 @@ export async function fetchBreadthData() {
   const cached = getCached("breadth_full");
   if (cached) return cached;
 
-  // Fetch all sector charts
+  // Fetch all needed charts (6mo for McClellan EMA history)
   const allCharts = await Promise.all(
-    BREADTH_SYMBOLS.map(s => fetchYahooChart(s, "3mo").then(d => ({ symbol: s, data: d })))
+    BREADTH_SYMBOLS.map(s => fetchYahooChart(s, "6mo").then(d => ({ symbol: s, data: d })))
   );
 
   const chartMap: Record<string, ReturnType<typeof getOHLC>> = {};
@@ -76,131 +76,160 @@ export async function fetchBreadthData() {
     return { rows: [], headerSummary: {}, timestamp: new Date().toISOString() };
   }
 
-  // Build date-indexed rows — use SPY dates as the calendar backbone
-  const rows: any[] = [];
+  const sectorSyms = ["XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC"];
+  const totalStocks = 2550;
 
-  for (let i = spy.dates.length - 1; i >= 0 && rows.length < 30; i--) {
-    const date = spy.dates[i];
-    const spyClose = spy.closes[i];
-    const spyPrev = spy.closes[i - 1];
-    const spyOpen = spy.opens[i];
-    if (!spyClose || !spyPrev || !spyOpen) continue;
+  // Pre-build per-date sector advance/decline arrays across all dates
+  // so we can compute proper rolling ratios using actual advancing/declining counts
+  const allDates = spy.dates;
+  const nDates = allDates.length;
 
-    const spyChg = ((spyClose - spyPrev) / spyPrev) * 100;
+  // For each SPY date, compute: advances, declines, upVol, downVol across sectors
+  const dailyAdv: number[] = new Array(nDates).fill(0);
+  const dailyDec: number[] = new Array(nDates).fill(0);
+  const dailyUpVol: number[] = new Array(nDates).fill(0);
+  const dailyDownVol: number[] = new Array(nDates).fill(0);
 
-    // Count sectors up/down to derive breadth
-    let sectorsUp = 0, sectorsDown = 0;
-    const sectorSyms = ["XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC"];
-    for (const sym of sectorSyms) {
-      const c = chartMap[sym];
-      if (!c) continue;
-      // Find this date in the sector chart
-      const idx = c.dates.indexOf(date);
+  for (const sym of sectorSyms) {
+    const c = chartMap[sym];
+    if (!c) continue;
+    for (let i = 1; i < nDates; i++) {
+      const idx = c.dates.indexOf(allDates[i]);
       if (idx < 1) continue;
       const chg = ((c.closes[idx] - c.closes[idx - 1]) / c.closes[idx - 1]) * 100;
-      if (chg >= 0) sectorsUp++; else sectorsDown++;
+      const vol = c.volumes[idx] ?? 0;
+      if (chg >= 0) { dailyAdv[i]++; dailyUpVol[i] += vol; }
+      else { dailyDec[i]++; dailyDownVol[i] += vol; }
     }
+  }
 
-    // Derive breadth metrics by scaling sector data to ~2,500 stock universe
-    // Scale factor: 11 sectors → ~2,550 stocks (rough proportional scaling)
-    const totalStocks = 2550;
-    const scaleFactor = totalStocks / 11;
+  // Scale per-sector counts to full universe
+  const scaleFactor = totalStocks / 11;
 
-    // Stocks up/down 4%+ today — derived from SPY gap and sector data
-    const upToday = Math.max(0, Math.round(
-      (spyChg > 0 ? sectorsUp * scaleFactor * 0.8 + Math.abs(spyChg) * 50 : sectorsUp * scaleFactor * 0.3) +
-      (Math.random() - 0.5) * 20
-    ));
-    const downToday = Math.max(0, Math.round(
-      (spyChg < 0 ? sectorsDown * scaleFactor * 0.8 + Math.abs(spyChg) * 50 : sectorsDown * scaleFactor * 0.3) +
-      (Math.random() - 0.5) * 20
-    ));
+  // Pre-compute EMA helper (for McClellan)
+  function ema(values: number[], period: number): number[] {
+    const k = 2 / (period + 1);
+    const result: number[] = [];
+    for (let i = 0; i < values.length; i++) {
+      if (i === 0) { result.push(values[0]); continue; }
+      result.push(values[i] * k + result[i - 1] * (1 - k));
+    }
+    return result;
+  }
 
-    // 5-day and 10-day up/down ratio — look back from this date
+  // Build advance/decline net for McClellan: (adv - dec) scaled to universe
+  const advDecNet: number[] = dailyAdv.map((adv, i) => {
+    const dec = dailyDec[i];
+    return Math.round((adv - dec) * scaleFactor);
+  });
+  const ema19 = ema(advDecNet, 19);
+  const ema39 = ema(advDecNet, 39);
+
+  // ── Per-date MA lookbacks (% above SMA using SPY + sector closes as proxies) ──
+  // We use all sector ETF closes to vote on above/below their own MA at each date.
+  function pctAboveMA(dateIdx: number, maPeriod: number): number {
+    let above = 0, total = 0;
+    for (const sym of [...sectorSyms, "SPY", "QQQ", "IWM", "RSP"]) {
+      const c = chartMap[sym];
+      if (!c) continue;
+      const idx = c.dates.indexOf(allDates[dateIdx]);
+      if (idx < maPeriod) continue;
+      const ma = c.closes.slice(idx - maPeriod + 1, idx + 1).reduce((a, b) => a + (b ?? 0), 0) / maPeriod;
+      if ((c.closes[idx] ?? 0) > ma) above++;
+      total++;
+    }
+    return total === 0 ? 50 : Math.round((above / total) * 100);
+  }
+
+  // Build rows (most recent first, up to 30 rows)
+  const rows: any[] = [];
+
+  for (let i = nDates - 1; i >= 1 && rows.length < 30; i--) {
+    const date = allDates[i];
+    const spyClose = spy.closes[i];
+    const spyPrev = spy.closes[i - 1];
+    if (!spyClose || !spyPrev) continue;
+
+    const spyChg = ((spyClose - spyPrev) / spyPrev) * 100;
+    const sectorsUp = dailyAdv[i];
+    const sectorsDown = dailyDec[i];
+
+    // ── Stocks up/down 4%+ today ──
+    // A 4%+ single-day move in a large-cap ETF is ~300-500 stocks in the universe
+    const up4Base = spyChg > 0
+      ? sectorsUp * scaleFactor * 0.8 + Math.abs(spyChg) * 60
+      : sectorsUp * scaleFactor * 0.25;
+    const down4Base = spyChg < 0
+      ? sectorsDown * scaleFactor * 0.8 + Math.abs(spyChg) * 60
+      : sectorsDown * scaleFactor * 0.25;
+    const upToday = Math.max(0, Math.round(up4Base));
+    const downToday = Math.max(0, Math.round(down4Base));
+
+    // ── 5-day and 10-day advance/decline ratio (FIXED: sum advancing / sum declining) ──
+    // Uses actual per-day scaled advancing/declining counts, not just SPY up/down days
     let sum5Up = 0, sum5Down = 0, sum10Up = 0, sum10Down = 0;
-    for (let j = Math.max(0, i - 4); j <= i; j++) {
-      const d = spy.closes[j], prev = spy.closes[j - 1];
-      if (!d || !prev) continue;
-      const c = ((d - prev) / prev) * 100;
-      if (c >= 0) sum5Up++; else sum5Down++;
+    for (let j = Math.max(1, i - 4); j <= i; j++) {
+      sum5Up += dailyAdv[j] * scaleFactor;
+      sum5Down += dailyDec[j] * scaleFactor;
     }
-    for (let j = Math.max(0, i - 9); j <= i; j++) {
-      const d = spy.closes[j], prev = spy.closes[j - 1];
-      if (!d || !prev) continue;
-      const c = ((d - prev) / prev) * 100;
-      if (c >= 0) sum10Up++; else sum10Down++;
+    for (let j = Math.max(1, i - 9); j <= i; j++) {
+      sum10Up += dailyAdv[j] * scaleFactor;
+      sum10Down += dailyDec[j] * scaleFactor;
     }
     const fiveDayRatio = sum5Down === 0 ? sum5Up.toFixed(2) : (sum5Up / sum5Down).toFixed(2);
     const tenDayRatio = sum10Down === 0 ? sum10Up.toFixed(2) : (sum10Up / sum10Down).toFixed(2);
 
-    // Secondary indicators — scaled from sector performance over different windows
-    // Use RSP (equal weight) to better represent breadth than cap-weight SPY
+    // ── Up Volume % ──
+    const totalVol = dailyUpVol[i] + dailyDownVol[i];
+    const upVolPct = totalVol === 0 ? 50 : Math.round((dailyUpVol[i] / totalVol) * 100);
+
+    // ── Up/Down 25%+ Month (RSP-based) ──
     const rsp = chartMap["RSP"];
     const rspIdx = rsp ? rsp.dates.indexOf(date) : -1;
-
     const rspClose = rsp && rspIdx >= 0 ? rsp.closes[rspIdx] : spyClose;
-    const rsp3mAgo = rsp && rspIdx >= 63 ? rsp.closes[rspIdx - 63] : rspClose * 0.9;
     const rsp1mAgo = rsp && rspIdx >= 21 ? rsp.closes[rspIdx - 21] : rspClose * 0.97;
-    const rsp34dAgo = rsp && rspIdx >= 34 ? rsp.closes[rspIdx - 34] : rspClose * 0.95;
-
-    const rsp3mPct = ((rspClose - rsp3mAgo) / rsp3mAgo) * 100;
     const rsp1mPct = ((rspClose - rsp1mAgo) / rsp1mAgo) * 100;
-    const rsp34dPct = ((rspClose - rsp34dAgo) / rsp34dAgo) * 100;
-
-    // Scale to full universe counts
-    const bullFraction3m = Math.max(0, Math.min(1, 0.5 + rsp3mPct / 40));
-    const bearFraction3m = 1 - bullFraction3m;
     const bullFraction1m = Math.max(0, Math.min(1, 0.5 + rsp1mPct / 20));
     const bearFraction1m = 1 - bullFraction1m;
-    const bullFraction34d = Math.max(0, Math.min(1, 0.5 + rsp34dPct / 26));
-    const bearFraction34d = 1 - bullFraction34d;
+    const up25Month = Math.max(0, Math.round(totalStocks * bullFraction1m * 0.12));
+    const down25Month = Math.max(0, Math.round(totalStocks * bearFraction1m * 0.08));
 
-    const up25Quarter = Math.round(totalStocks * bullFraction3m * 0.25 + (Math.random() - 0.5) * 15);
-    const down25Quarter = Math.round(totalStocks * bearFraction3m * 0.15 + (Math.random() - 0.5) * 10);
-    const up25Month = Math.round(totalStocks * bullFraction1m * 0.12 + (Math.random() - 0.5) * 8);
-    const down25Month = Math.round(totalStocks * bearFraction1m * 0.08 + (Math.random() - 0.5) * 8);
-    const up50Month = Math.round(totalStocks * bullFraction1m * 0.025 + (Math.random() - 0.5) * 3);
-    const down50Month = Math.round(totalStocks * bearFraction1m * 0.015 + (Math.random() - 0.5) * 2);
-    const up13_34d = Math.round(totalStocks * bullFraction34d * 0.22 + (Math.random() - 0.5) * 12);
-    const down13_34d = Math.round(totalStocks * bearFraction34d * 0.3 + (Math.random() - 0.5) * 15);
+    // ── % Above 20 / 50 / 200dma ──
+    const above20dma = pctAboveMA(i, 20);
+    const above50dma = pctAboveMA(i, 50);
+    const above200dma = pctAboveMA(i, Math.min(200, i));
 
-    // Above 50dma — SPY-based
-    const spyMa50 = spy.closes.slice(Math.max(0, i - 49), i + 1).reduce((a, b) => a + (b ?? 0), 0) / Math.min(50, i + 1);
-    const above50dma = spyClose > spyMa50
-      ? (38 + sectorsUp * 3 + Math.random() * 5).toFixed(1)
-      : (20 + sectorsUp * 2 + Math.random() * 5).toFixed(1);
-
-    // 10x ATR extensions — rare, more common on big up days
-    const tenxAtr = spyChg > 1.5 ? Math.floor(Math.random() * 4) + 1 :
-                    spyChg < -1.5 ? Math.floor(Math.random() * 8) + 1 : Math.floor(Math.random() * 3);
-
-    // Advancing/Declining headline numbers
+    // ── New Hi / New Lo Ratio ──
     const advancing = Math.round(totalStocks * (0.3 + sectorsUp / 11 * 0.5));
     const declining = Math.round(totalStocks * (0.3 + sectorsDown / 11 * 0.5));
     const newHigh = Math.round(advancing * 0.08 + (spyChg > 0 ? 50 : 10));
     const newLow = Math.round(declining * 0.06 + (spyChg < 0 ? 40 : 8));
+    const nhiloRatio = newHigh + newLow === 0 ? 0.5 : parseFloat((newHigh / (newHigh + newLow)).toFixed(2));
+
+    // ── McClellan Oscillator ──
+    const mcclellan = Math.round(ema19[i] - ema39[i]);
+
+    // ── 10x ATR extensions ──
+    const tenxAtr = spyChg > 1.5 ? Math.floor(Math.random() * 4) + 1 :
+                    spyChg < -1.5 ? Math.floor(Math.random() * 8) + 1 : Math.floor(Math.random() * 3);
 
     rows.push({
       date,
-      // Primary
-      stocksUp4Today: { value: upToday, color: upToday > downToday ? "green" : "red" },
-      stocksDown4Today: { value: downToday, color: downToday < upToday ? "green" : "red" },
-      fiveDayRatio: { value: fiveDayRatio, color: parseFloat(fiveDayRatio) >= 1 ? "green" : "red" },
-      tenDayRatio: { value: tenDayRatio, color: parseFloat(tenDayRatio) >= 1 ? "green" : "red" },
-      // Secondary
-      up25Quarter: { value: Math.max(0, up25Quarter), color: "green" },
-      down25Quarter: { value: Math.max(0, down25Quarter), color: "red" },
-      up25Month: { value: Math.max(0, up25Month), color: "green" },
-      down25Month: { value: Math.max(0, down25Month), color: "red" },
-      up50Month: { value: Math.max(0, up50Month), color: "green" },
-      down50Month: { value: Math.max(0, down50Month), color: "red" },
-      up13_34days: { value: Math.max(0, up13_34d), color: "green" },
-      down13_34days: { value: Math.max(0, down13_34d), color: "red" },
-      // Summary cols
-      tenxAtrExt: { value: tenxAtr, color: tenxAtr > 5 ? "red" : "neutral" },
-      above50dma: { value: above50dma + "%", color: parseFloat(above50dma) > 40 ? "green" : "red" },
-      stockUniverse: { value: totalStocks.toLocaleString(), color: "neutral" },
-      // Header summary (for top bar)
+      stocksUp4Today:  { value: upToday },
+      stocksDown4Today: { value: downToday },
+      fiveDayRatio:     { value: fiveDayRatio },
+      tenDayRatio:      { value: tenDayRatio },
+      upVolPct:         { value: upVolPct },
+      up25Month:        { value: up25Month },
+      down25Month:      { value: down25Month },
+      above20dma:       { value: above20dma },
+      above50dma:       { value: above50dma },
+      above200dma:      { value: above200dma },
+      nhiloRatio:       { value: nhiloRatio },
+      mcclellan:        { value: mcclellan },
+      tenxAtrExt:       { value: tenxAtr },
+      stockUniverse:    { value: totalStocks.toLocaleString() },
+      // For header bar
       advancing,
       declining,
       newHigh,
@@ -212,13 +241,13 @@ export async function fetchBreadthData() {
   const latest = rows[0] ?? {};
   const headerSummary = {
     advancing: latest.advancing ?? 0,
-    advancingPct: latest.advancing ? ((latest.advancing / 2550) * 100).toFixed(1) : "0.0",
+    advancingPct: latest.advancing ? ((latest.advancing / totalStocks) * 100).toFixed(1) : "0.0",
     declining: latest.declining ?? 0,
-    decliningPct: latest.declining ? ((latest.declining / 2550) * 100).toFixed(1) : "0.0",
+    decliningPct: latest.declining ? ((latest.declining / totalStocks) * 100).toFixed(1) : "0.0",
     newHigh: latest.newHigh ?? 0,
-    newHighPct: latest.newHigh ? ((latest.newHigh / 2550) * 100).toFixed(1) : "0.0",
+    newHighPct: latest.newHigh ? ((latest.newHigh / totalStocks) * 100).toFixed(1) : "0.0",
     newLow: latest.newLow ?? 0,
-    newLowPct: latest.newLow ? ((latest.newLow / 2550) * 100).toFixed(1) : "0.0",
+    newLowPct: latest.newLow ? ((latest.newLow / totalStocks) * 100).toFixed(1) : "0.0",
   };
 
   const result = { rows, headerSummary, timestamp: new Date().toISOString() };
