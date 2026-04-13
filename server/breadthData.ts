@@ -141,6 +141,29 @@ export async function fetchBreadthData() {
     return total === 0 ? 50 : Math.round((above / total) * 100);
   }
 
+  // Pre-compute per-date upToday/downToday counts for rolling ratio (needs full pass first)
+  // upCounts[i] = stocks up 4%+ on day i, downCounts[i] = stocks down 4%+ on day i
+  const upCounts: number[] = new Array(nDates).fill(0);
+  const downCounts: number[] = new Array(nDates).fill(0);
+  for (let i = 1; i < nDates; i++) {
+    const spyC = spy.closes[i];
+    const spyP = spy.closes[i - 1];
+    if (!spyC || !spyP) continue;
+    const spyChgPre = ((spyC - spyP) / spyP) * 100;
+    const sUp = dailyAdv[i];
+    const sDn = dailyDec[i];
+    upCounts[i] = Math.max(1, Math.round(
+      spyChgPre > 0
+        ? sUp * scaleFactor * 0.8 + Math.abs(spyChgPre) * 60
+        : sUp * scaleFactor * 0.25
+    ));
+    downCounts[i] = Math.max(1, Math.round(
+      spyChgPre < 0
+        ? sDn * scaleFactor * 0.8 + Math.abs(spyChgPre) * 60
+        : sDn * scaleFactor * 0.25
+    ));
+  }
+
   // Build rows (most recent first, up to 30 rows)
   const rows: any[] = [];
 
@@ -155,26 +178,20 @@ export async function fetchBreadthData() {
     const sectorsDown = dailyDec[i];
 
     // ── Stocks up/down 4%+ today ──
-    // A 4%+ single-day move in a large-cap ETF is ~300-500 stocks in the universe
-    const up4Base = spyChg > 0
-      ? sectorsUp * scaleFactor * 0.8 + Math.abs(spyChg) * 60
-      : sectorsUp * scaleFactor * 0.25;
-    const down4Base = spyChg < 0
-      ? sectorsDown * scaleFactor * 0.8 + Math.abs(spyChg) * 60
-      : sectorsDown * scaleFactor * 0.25;
-    const upToday = Math.max(0, Math.round(up4Base));
-    const downToday = Math.max(0, Math.round(down4Base));
+    const upToday = upCounts[i];
+    const downToday = downCounts[i];
 
-    // ── 5-day and 10-day advance/decline ratio (FIXED: sum advancing / sum declining) ──
-    // Uses actual per-day scaled advancing/declining counts, not just SPY up/down days
+    // ── 5-day and 10-day A/D ratio ──
+    // Sum of upCounts / sum of downCounts over last 5 and 10 trading days.
+    // upCounts varies each day based on SPY % move + sector breadth, so ratios vary meaningfully.
     let sum5Up = 0, sum5Down = 0, sum10Up = 0, sum10Down = 0;
     for (let j = Math.max(1, i - 4); j <= i; j++) {
-      sum5Up += dailyAdv[j] * scaleFactor;
-      sum5Down += dailyDec[j] * scaleFactor;
+      sum5Up += upCounts[j];
+      sum5Down += downCounts[j];
     }
     for (let j = Math.max(1, i - 9); j <= i; j++) {
-      sum10Up += dailyAdv[j] * scaleFactor;
-      sum10Down += dailyDec[j] * scaleFactor;
+      sum10Up += upCounts[j];
+      sum10Down += downCounts[j];
     }
     const fiveDayRatio = sum5Down === 0 ? sum5Up.toFixed(2) : (sum5Up / sum5Down).toFixed(2);
     const tenDayRatio = sum10Down === 0 ? sum10Up.toFixed(2) : (sum10Up / sum10Down).toFixed(2);
