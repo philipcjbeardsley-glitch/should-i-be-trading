@@ -209,14 +209,18 @@ export async function fetchBreadthData() {
     // 1-day A/D ratio
     const adv1 = upCounts[i];
     const dec1 = downCounts[i];
-    const oneDayRatio = dec1 === 0 ? adv1.toFixed(2) : (adv1 / dec1).toFixed(2);
+    // 1-day A/D ratio — floor denominator at 50 to prevent extreme values; cap at 99.99
+    const adv1Safe = Math.max(1, adv1);
+    const dec1Safe = Math.max(50, dec1);
+    const oneDayRatioRaw = adv1Safe / dec1Safe;
+    const oneDayRatio = Math.min(99.99, oneDayRatioRaw).toFixed(2);
 
     // 5-day / 10-day A/D ratio
     let s5u = 0, s5d = 0, s10u = 0, s10d = 0;
     for (let j = Math.max(1, i - 4); j <= i; j++) { s5u += upCounts[j]; s5d += downCounts[j]; }
     for (let j = Math.max(1, i - 9); j <= i; j++) { s10u += upCounts[j]; s10d += downCounts[j]; }
-    const fiveDayRatio = s5d === 0 ? s5u.toFixed(2) : (s5u / s5d).toFixed(2);
-    const tenDayRatio = s10d === 0 ? s10u.toFixed(2) : (s10u / s10d).toFixed(2);
+    const fiveDayRatio = Math.min(99.99, s5u / Math.max(50, s5d)).toFixed(2);
+    const tenDayRatio = Math.min(99.99, s10u / Math.max(50, s10d)).toFixed(2);
 
     // Up volume % (daily + 10d MA)
     const upVolPct = upVolPctArr[i];
@@ -418,30 +422,49 @@ export async function fetchBreadthData() {
   const latestRow = rows[0] ?? {};
   const zbtStatus = latestRow.zbtVal ?? { value: 0, building: false, progress: 0, signal: false };
 
-  // ── Composite breadth score ──────────────────────────────────────────────
-  // 6 inputs, equal weight: 5d ratio, upVolMa10, above50dma, McClellan norm, Hi/Lo ratio, netNewHighs 10d MA
-  function norm(val: number, lo: number, hi: number): number {
-    return Math.max(0, Math.min(100, ((val - lo) / (hi - lo)) * 100));
-  }
-  const r = latestRow;
-  const s1 = norm(parseFloat(r.fiveDayRatio?.value ?? "1"), 0.3, 3.5);
-  const s2 = norm(r.upVolMa10?.value ?? 50, 30, 75);
-  const s3 = norm(r.above50dma?.value ?? 50, 10, 90);
-  const s4 = norm((r.mcclellan?.value ?? 0) + 200, 0, 400); // shift -200..+200 → 0..400
-  const s5 = norm(r.nhiloRatio?.value ?? 0.5, 0, 1) * 100;  // already 0-1
-  const s6 = norm((r.netNewHighsMa10?.value ?? 0) + 300, 0, 600); // shift -300..+300 → 0..600
-  const compositeScore = Math.round((s1 + s2 + s3 + s4 + norm(r.nhiloRatio?.value ?? 0.5, 0, 1) * 100 + s6) / 6);
+  // ── Composite breadth score — PERCENTILE RANK METHOD ────────────────────
+  // For each of the 6 inputs, compute its percentile rank over all available history.
+  // Percentile rank = % of historical values that are LESS THAN the current value → 0..100.
+  // Average the six percentile ranks → composite score is guaranteed 0..100.
+  // Inputs: fiveDayRatio, upVolPct (daily), above50dma, mcclellan, nhiloRatio, netNewHighs
 
-  // Composite trend: compare to 5 rows ago
-  const scoreHistory: number[] = rows.slice(0, 5).map((rr: any) => {
-    const _s1 = norm(parseFloat(rr.fiveDayRatio?.value ?? "1"), 0.3, 3.5);
-    const _s2 = norm(rr.upVolMa10?.value ?? 50, 30, 75);
-    const _s3 = norm(rr.above50dma?.value ?? 50, 10, 90);
-    const _s4 = norm((rr.mcclellan?.value ?? 0) + 200, 0, 400);
-    const _s5 = norm(rr.nhiloRatio?.value ?? 0.5, 0, 1) * 100;
-    const _s6 = norm((rr.netNewHighsMa10?.value ?? 0) + 300, 0, 600);
-    return Math.round((_s1 + _s2 + _s3 + _s4 + _s5 + _s6) / 6);
-  });
+  // Build history arrays for the 6 composite inputs from all rows
+  const hist_r5    = rows.map((rr: any) => parseFloat(rr.fiveDayRatio?.value ?? "1")).filter(v => !isNaN(v));
+  const hist_uv    = rows.map((rr: any) => rr.upVolPct?.value ?? 50).filter((v: number) => !isNaN(v));
+  const hist_a50   = rows.map((rr: any) => rr.above50dma?.value ?? 50).filter((v: number) => !isNaN(v));
+  const hist_mc    = rows.map((rr: any) => rr.mcclellan?.value ?? 0).filter((v: number) => !isNaN(v));
+  const hist_hilo  = rows.map((rr: any) => rr.nhiloRatio?.value ?? 0.5).filter((v: number) => !isNaN(v));
+  const hist_nnh   = rows.map((rr: any) => rr.netNewHighs?.value ?? 0).filter((v: number) => !isNaN(v));
+
+  function pctRank(history: number[], val: number): number {
+    if (history.length === 0) return 50;
+    const below = history.filter(v => v < val).length;
+    return Math.round((below / history.length) * 100);
+  }
+
+  function calcCompositeForRow(rr: any): number {
+    const v1 = parseFloat(rr.fiveDayRatio?.value ?? "1");
+    const v2 = rr.upVolPct?.value ?? 50;
+    const v3 = rr.above50dma?.value ?? 50;
+    const v4 = rr.mcclellan?.value ?? 0;
+    const v5 = rr.nhiloRatio?.value ?? 0.5;
+    const v6 = rr.netNewHighs?.value ?? 0;
+    const p1 = pctRank(hist_r5,   v1);
+    const p2 = pctRank(hist_uv,   v2);
+    const p3 = pctRank(hist_a50,  v3);
+    const p4 = pctRank(hist_mc,   v4);
+    const p5 = pctRank(hist_hilo, v5);
+    const p6 = pctRank(hist_nnh,  v6);
+    return Math.round((p1 + p2 + p3 + p4 + p5 + p6) / 6);
+  }
+
+  const r = latestRow;
+  const compositeScore = Math.max(0, Math.min(100, calcCompositeForRow(r)));
+
+  // Score history: compute composite for last 7 rows (for trend sparkline)
+  const scoreHistory: number[] = rows.slice(0, 7).map((rr: any) =>
+    Math.max(0, Math.min(100, calcCompositeForRow(rr)))
+  );
   const trend5d = scoreHistory.length >= 5
     ? compositeScore - scoreHistory[4]
     : 0;
