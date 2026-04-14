@@ -363,13 +363,13 @@ function SectorHeatmap({ sectorBreadth }: { sectorBreadth: any[] }) {
                   <td style={{ background: scoreC.bg, color: scoreC.text, fontFamily: "IBM Plex Mono, monospace", fontSize: 9, textAlign: "center", padding: "3px 4px", border: "1px solid #0a0f1a", fontWeight: 700 }}>
                     {s.sectorScore ?? 50}
                   </td>
-                  {/* New 20d High */}
+                  {/* New 20d High % — per-stock */}
                   <td style={{
-                    background: s.new20dHigh ? "rgb(13,35,18)" : "rgb(18,18,22)",
-                    color: s.new20dHigh ? "#4ade80" : "#374151",
+                    background: pctileColor(s.new20dHighPct).bg,
+                    color: pctileColor(s.new20dHighPct).text,
                     fontFamily: "IBM Plex Mono, monospace", fontSize: 9, textAlign: "center", padding: "3px 4px", border: "1px solid #0a0f1a",
                   }}>
-                    {s.new20dHigh ? "✓" : "–"}
+                    {(s.new20dHighPct ?? 0).toFixed(0)}%
                   </td>
                 </tr>
               );
@@ -579,8 +579,8 @@ export default function BreadthTab() {
 
   useEffect(() => {
     const update = () => {
-      // Each chart gets half of tier2 height (41vh) minus header/gap overhead
-      setChartH(Math.max(130, Math.floor(window.innerHeight * 0.41 / 2) - 18));
+      // Each chart = half of Tier 2 (41vh) minus label/gap overhead
+      setChartH(Math.max(140, Math.floor(window.innerHeight * 0.41 / 2) - 16));
     };
     update();
     window.addEventListener("resize", update);
@@ -693,12 +693,12 @@ export default function BreadthTab() {
     { label: "1y", val: 252 },
   ];
 
-  // ── Three-tier single-viewport layout ─────────────────────────────────────
+  // ── Layout: Tier 1+2 visible on load, page scrolls normally ──────────────
   return (
     <>
       <div style={{
-        height: "100%", display: "flex", flexDirection: "column",
-        overflow: "hidden", padding: "6px 8px 4px", gap: 5,
+        display: "flex", flexDirection: "column",
+        padding: "6px 8px 4px", gap: 5,
         boxSizing: "border-box", background: "#080c18",
       }}>
 
@@ -758,9 +758,10 @@ export default function BreadthTab() {
           </div>
         </div>
 
-        {/* ── TOOLBAR ── */}
+        {/* ── TOOLBAR (sticky) ── */}
         <div style={{
-          flexShrink: 0, display: "flex", alignItems: "center", gap: 6,
+          position: "sticky", top: 0, zIndex: 20, background: "#080c18",
+          display: "flex", alignItems: "center", gap: 6,
           height: 28, flexWrap: "nowrap",
         }}>
           {/* Summary / Full Detail toggle */}
@@ -803,9 +804,9 @@ export default function BreadthTab() {
           >↓ CSV</button>
         </div>
 
-        {/* ── TIER 3: Data Table (only element with internal scroll) ── */}
-        <div style={{ flex: 1, overflow: "hidden", minHeight: 0 }}>
-          <div style={{ height: "100%", overflowY: "auto", overflowX: "auto" }}>
+        {/* ── TIER 3: Data Table — full natural height, horizontal scroll only ── */}
+        <div>
+          <div style={{ overflowX: "auto" }}>
             {!showFullDetail ? (
               /* ── SUMMARY VIEW ── */
               <table style={{ borderCollapse: "collapse", fontSize: 10, whiteSpace: "nowrap", width: "100%", tableLayout: "fixed" }}>

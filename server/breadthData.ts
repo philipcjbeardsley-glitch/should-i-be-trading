@@ -50,6 +50,23 @@ function getOHLC(chartData: any): { dates: string[]; opens: number[]; highs: num
 
 const BREADTH_SYMBOLS = ["SPY", "QQQ", "IWM", "RSP", "MDY", "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC"];
 
+// Representative sector constituents — 8 liquid stocks per sector.
+// Used to compute real per-stock breadth metrics (% above MA, A/D ratio, new 20d highs).
+// Values derived from 8 stocks give multiples of 12.5% — granular and non-round-looking.
+const SECTOR_STOCKS: Record<string, string[]> = {
+  XLK:  ["AAPL","MSFT","NVDA","AVGO","AMD","CRM","ADBE","INTC"],
+  XLF:  ["JPM","BAC","GS","MS","WFC","BLK","AXP","SCHW"],
+  XLE:  ["XOM","CVX","COP","EOG","SLB","MPC","OXY","VLO"],
+  XLV:  ["UNH","LLY","JNJ","ABBV","MRK","TMO","ABT","AMGN"],
+  XLI:  ["GE","CAT","HON","UPS","RTX","DE","ETN","LMT"],
+  XLY:  ["AMZN","TSLA","HD","MCD","NKE","LOW","TJX","BKNG"],
+  XLP:  ["PG","KO","PEP","COST","WMT","CL","PM","MDLZ"],
+  XLU:  ["NEE","DUK","SO","D","EXC","XEL","AWK","WEC"],
+  XLB:  ["LIN","APD","ECL","SHW","NEM","FCX","NUE","VMC"],
+  XLRE: ["PLD","AMT","EQIX","CCI","PSA","WELL","DLR","O"],
+  XLC:  ["GOOGL","META","NFLX","TMUS","T","VZ","DIS","EA"],
+};
+
 export async function fetchBreadthData() {
   const cached = getCached("breadth_full");
   if (cached) return cached;
@@ -61,6 +78,16 @@ export async function fetchBreadthData() {
   const chartMap: Record<string, ReturnType<typeof getOHLC>> = {};
   for (const { symbol, data } of allCharts) {
     chartMap[symbol] = getOHLC(data);
+  }
+
+  // Fetch per-stock sector constituents for real breadth metrics (parallel)
+  const allSectorStockSyms = [...new Set(Object.values(SECTOR_STOCKS).flat())];
+  const sectorStockResults = await Promise.all(
+    allSectorStockSyms.map(s => fetchYahooChart(s, "1y").then(d => ({ symbol: s, data: d })))
+  );
+  const sectorStockMap: Record<string, ReturnType<typeof getOHLC>> = {};
+  for (const { symbol, data } of sectorStockResults) {
+    sectorStockMap[symbol] = getOHLC(data);
   }
 
   const spy = chartMap["SPY"];
@@ -410,66 +437,103 @@ export async function fetchBreadthData() {
     }
   }
 
+  // ── Per-stock sector breadth helpers ────────────────────────────────────
+  // Returns % of constituent stocks above their N-day MA (0–100, multiples of 12.5)
+  function sectorStockPctAboveMA(sym: string, maPeriod: number): number {
+    const stocks = SECTOR_STOCKS[sym] ?? [];
+    if (stocks.length === 0) return 50;
+    let above = 0, total = 0;
+    for (const s of stocks) {
+      const c = sectorStockMap[s];
+      if (!c || c.closes.length === 0) continue;
+      const idx = c.closes.length - 1;
+      if (idx < maPeriod - 1) continue;
+      const slice = c.closes.slice(idx - maPeriod + 1, idx + 1).filter((v): v is number => v != null && !isNaN(v));
+      if (slice.length < Math.ceil(maPeriod * 0.7)) continue;
+      const ma = slice.reduce((a, b) => a + b, 0) / slice.length;
+      if ((c.closes[idx] ?? 0) > ma) above++;
+      total++;
+    }
+    return total === 0 ? 50 : Math.round((above / total) * 100);
+  }
+
+  // Returns adv/dec ratio over last 5 trading days across constituent stocks
+  function sectorStockAdRatio5d(sym: string): number {
+    const stocks = SECTOR_STOCKS[sym] ?? [];
+    if (stocks.length === 0) return 1.0;
+    let adv = 0, dec = 0;
+    for (const s of stocks) {
+      const c = sectorStockMap[s];
+      if (!c || c.closes.length < 2) continue;
+      for (let d = 1; d <= 5 && d < c.closes.length; d++) {
+        const i = c.closes.length - d;
+        if (i < 1) continue;
+        const chg = c.closes[i] != null && c.closes[i - 1] != null
+          ? ((c.closes[i] - c.closes[i - 1]) / c.closes[i - 1]) * 100 : 0;
+        if (chg >= 0) adv++; else dec++;
+      }
+    }
+    return dec === 0 ? Math.min(99, adv) : parseFloat((adv / dec).toFixed(2));
+  }
+
+  // Returns % of constituent stocks making a new 20-day closing high today
+  function sectorStockNew20dHighPct(sym: string): number {
+    const stocks = SECTOR_STOCKS[sym] ?? [];
+    if (stocks.length === 0) return 0;
+    let atHigh = 0, total = 0;
+    for (const s of stocks) {
+      const c = sectorStockMap[s];
+      if (!c || c.closes.length < 20) continue;
+      const idx = c.closes.length - 1;
+      const slice = c.closes.slice(Math.max(0, idx - 19), idx + 1).filter((v): v is number => v != null && !isNaN(v));
+      if (slice.length < 10) continue;
+      const maxV = Math.max(...slice);
+      if ((c.closes[idx] ?? 0) >= maxV) atHigh++;
+      total++;
+    }
+    return total === 0 ? 0 : Math.round((atHigh / total) * 100);
+  }
+
   // ── Sector breadth heatmap ───────────────────────────────────────────────
   const latestIdx = nDates - 1;
 
   const sectorBreadth = sectorSyms.map(sym => {
     const c = chartMap[sym];
-    if (!c) return {
+    const empty = {
       sym, name: sectorNames[sym] ?? sym, dailyChg: 0,
       ma5: 50, ma20: 50, ma40: 50, ma50: 50, ma200: 50,
-      adRatio5d: 1.0, netNewHighs: 0, new20dHigh: false, sectorScore: 50,
+      adRatio5d: 1.0, netNewHighs: 0, new20dHighPct: 0, sectorScore: 50,
     };
+    if (!c) return empty;
     const cidx = c.dates.indexOf(allDates[latestIdx]);
-    if (cidx < 0) return {
-      sym, name: sectorNames[sym] ?? sym, dailyChg: 0,
-      ma5: 50, ma20: 50, ma40: 50, ma50: 50, ma200: 50,
-      adRatio5d: 1.0, netNewHighs: 0, new20dHigh: false, sectorScore: 50,
-    };
+    if (cidx < 0) return empty;
 
-    function sectorDaysAboveMA(maPeriod: number): number {
-      let above = 0, total = 0;
-      for (let j = Math.max(maPeriod, cidx - 19); j <= cidx; j++) {
-        const ma = c!.closes.slice(j - maPeriod + 1, j + 1).reduce((a: number, b: number) => a + (b ?? 0), 0) / maPeriod;
-        if ((c!.closes[j] ?? 0) > ma) above++;
-        total++;
-      }
-      return total === 0 ? 50 : Math.round((above / total) * 100);
-    }
-
-    // 5d A/D ratio for this sector
-    let su5 = 0, sd5 = 0;
-    for (let j = Math.max(1, cidx - 4); j <= cidx; j++) {
-      const chg = c.closes[j] != null && c.closes[j - 1] != null
-        ? ((c.closes[j] - c.closes[j - 1]) / c.closes[j - 1]) * 100 : 0;
-      if (chg >= 0) su5++; else sd5++;
-    }
-    const adRatio5d = sd5 === 0 ? su5 : parseFloat((su5 / sd5).toFixed(2));
-
-    // Net new highs proxy
-    const high252 = Math.max(...c.closes.slice(Math.max(0, cidx - 251), cidx + 1).filter((v): v is number => v != null));
-    const isNearHigh = (c.closes[cidx] ?? 0) > high252 * 0.97 ? 1 : 0;
-
-    // New 20-day high for this sector ETF
-    const closes20 = c.closes.slice(Math.max(0, cidx - 19), cidx + 1).filter((v): v is number => v != null);
-    const max20 = closes20.length > 0 ? Math.max(...closes20) : (c.closes[cidx] ?? 0);
-    const new20dHigh = (c.closes[cidx] ?? 0) >= max20;
-
-    // Daily % change
+    // Daily % change (ETF price)
     const dailyChg = (cidx > 0 && c.closes[cidx] != null && c.closes[cidx - 1] != null)
       ? parseFloat((((c.closes[cidx] - c.closes[cidx - 1]) / c.closes[cidx - 1]) * 100).toFixed(2))
       : 0;
 
-    const ma5   = sectorDaysAboveMA(5);
-    const ma20  = sectorDaysAboveMA(20);
-    const ma40  = sectorDaysAboveMA(40);
-    const ma50  = sectorDaysAboveMA(50);
-    const ma200 = cidx >= 200 ? sectorDaysAboveMA(200) : sectorDaysAboveMA(cidx);
+    // Per-stock MA breadth — each value is a multiple of 12.5% (0–100)
+    const ma5   = sectorStockPctAboveMA(sym, 5);
+    const ma20  = sectorStockPctAboveMA(sym, 20);
+    const ma40  = sectorStockPctAboveMA(sym, 40);
+    const ma50  = sectorStockPctAboveMA(sym, 50);
+    const ma200 = sectorStockPctAboveMA(sym, 200);
 
-    // Sector composite score (average of 5 MA metrics, 0-100)
+    // Per-stock 5-day A/D ratio
+    const adRatio5d = sectorStockAdRatio5d(sym);
+
+    // Per-stock % at new 20-day closing high
+    const new20dHighPct = sectorStockNew20dHighPct(sym);
+
+    // ETF near 52w high proxy (for netNewHighs column)
+    const high252 = Math.max(...c.closes.slice(Math.max(0, cidx - 251), cidx + 1).filter((v): v is number => v != null));
+    const isNearHigh = (c.closes[cidx] ?? 0) > high252 * 0.97 ? 1 : 0;
+
+    // Sector composite score (average of 5 MA pct metrics)
     const sectorScore = Math.round((ma5 + ma20 + ma40 + ma50 + ma200) / 5);
 
-    return { sym, name: sectorNames[sym] ?? sym, dailyChg, ma5, ma20, ma40, ma50, ma200, adRatio5d, netNewHighs: isNearHigh, new20dHigh, sectorScore };
+    return { sym, name: sectorNames[sym] ?? sym, dailyChg, ma5, ma20, ma40, ma50, ma200, adRatio5d, netNewHighs: isNearHigh, new20dHighPct, sectorScore };
   });
 
   // Sort sectors by composite score descending (strongest breadth at top)
