@@ -48,14 +48,7 @@ function getOHLC(chartData: any): { dates: string[]; opens: number[]; highs: num
   return { dates, opens, highs, lows, closes, volumes };
 }
 
-// The reference tool tracks a universe of ~2,500 stocks
-// We approximate breadth using a large basket of ETFs/indices covering the market
-// MMTH = % of stocks above 200dma (actual ETF), MMMM = McClellan, etc.
-// For the heatmap rows we derive daily breadth from SPY + sector ETFs + advance/decline proxies
-
 const BREADTH_SYMBOLS = ["SPY", "QQQ", "IWM", "RSP", "MDY", "XLK", "XLF", "XLE", "XLV", "XLI", "XLY", "XLP", "XLU", "XLB", "XLRE", "XLC"];
-// Advance/decline approximation ETFs
-const AD_SYMBOLS = ["ADNT", "AAPL", "MSFT", "AMZN", "NVDA", "GOOGL", "META", "TSLA", "JPM", "JNJ"];
 
 export async function fetchBreadthData() {
   const cached = getCached("breadth_full");
@@ -123,13 +116,32 @@ export async function fetchBreadthData() {
 
   const scaleFactor = totalStocks / 11;
 
+  // ── NASDAQ A/D for NAMO ───────────────────────────────────────────────────
+  // NAMO = NASDAQ McClellan Oscillator proxy using QQQ, XLK, XLC
+  const NASDAQ_SYMS = ["QQQ", "XLK", "XLC"];
+  const nasdaqAdv: number[] = new Array(nDates).fill(0);
+  const nasdaqDec: number[] = new Array(nDates).fill(0);
+  for (const sym of NASDAQ_SYMS) {
+    const c = chartMap[sym];
+    if (!c) continue;
+    for (let i = 1; i < nDates; i++) {
+      const idx = c.dates.indexOf(allDates[i]);
+      if (idx < 1) continue;
+      const chg = ((c.closes[idx] - c.closes[idx - 1]) / c.closes[idx - 1]) * 100;
+      if (chg >= 0) nasdaqAdv[i]++; else nasdaqDec[i]++;
+    }
+  }
+  const nasdaqScaleFactor = Math.round(3000 / NASDAQ_SYMS.length);
+  const nasdaqNet: number[] = nasdaqAdv.map((a, i) => Math.round((a - nasdaqDec[i]) * nasdaqScaleFactor));
+  const namoEma19 = ema(nasdaqNet, 19);
+  const namoEma39 = ema(nasdaqNet, 39);
+  const namoArr: number[] = namoEma19.map((v, i) => Math.round(v - namoEma39[i]));
+
   // ── McClellan arrays ─────────────────────────────────────────────────────
   const advDecNet: number[] = dailyAdv.map((adv, i) => Math.round((adv - dailyDec[i]) * scaleFactor));
   const ema19 = ema(advDecNet, 19);
   const ema39 = ema(advDecNet, 39);
-  // McClellan Oscillator: EMA19 - EMA39
   const mcOsc: number[] = ema19.map((v, i) => Math.round(v - ema39[i]));
-  // McClellan Summation Index: cumulative sum of oscillator
   const mcSum: number[] = [];
   let sumAcc = 0;
   for (let i = 0; i < mcOsc.length; i++) {
@@ -159,7 +171,30 @@ export async function fetchBreadthData() {
     return total === 0 ? 50 : Math.round((above / total) * 100);
   }
 
-  // ── Per-sector pctAboveMA for sector breadth heatmap ─────────────────────
+  // ── New 20-day high/low percentage across basket ─────────────────────────
+  function pctNew20dHighLow(dateIdx: number): { high: number; low: number } {
+    let highCnt = 0, lowCnt = 0, total = 0;
+    for (const sym of [...sectorSyms, "SPY", "QQQ", "IWM", "RSP"]) {
+      const c = chartMap[sym];
+      if (!c) continue;
+      const idx = c.dates.indexOf(allDates[dateIdx]);
+      if (idx < 20) continue;
+      const slice = c.closes.slice(idx - 19, idx + 1).filter((v): v is number => v != null && !isNaN(v));
+      if (slice.length < 10) continue;
+      const cur = c.closes[idx] ?? 0;
+      let maxV = -Infinity, minV = Infinity;
+      for (const v of slice) { if (v > maxV) maxV = v; if (v < minV) minV = v; }
+      if (cur >= maxV) highCnt++;
+      if (cur <= minV) lowCnt++;
+      total++;
+    }
+    return {
+      high: total === 0 ? 0 : Math.round((highCnt / total) * 100),
+      low:  total === 0 ? 0 : Math.round((lowCnt  / total) * 100),
+    };
+  }
+
+  // ── Per-sector pctAboveMA (kept for reference) ───────────────────────────
   function sectorPctAboveMA(sym: string, latestDateIdx: number, maPeriod: number): number {
     const c = chartMap[sym];
     if (!c) return 50;
@@ -186,6 +221,13 @@ export async function fetchBreadthData() {
     ));
   }
 
+  // ── Whaley Thrust streak (raw sector A/D ratio >= 2:1 for 2+ days) ───────
+  const whaleyStreak: number[] = new Array(nDates).fill(0);
+  for (let i = 1; i < nDates; i++) {
+    const wRatio = dailyDec[i] === 0 ? (dailyAdv[i] > 0 ? 99 : 1) : dailyAdv[i] / dailyDec[i];
+    whaleyStreak[i] = wRatio >= 2.0 ? (whaleyStreak[i - 1] + 1) : 0;
+  }
+
   // ── Up volume %, 10d MA ──────────────────────────────────────────────────
   const upVolPctArr: number[] = new Array(nDates).fill(50);
   for (let i = 1; i < nDates; i++) {
@@ -209,7 +251,6 @@ export async function fetchBreadthData() {
     // 1-day A/D ratio
     const adv1 = upCounts[i];
     const dec1 = downCounts[i];
-    // 1-day A/D ratio — floor denominator at 50 to prevent extreme values; cap at 99.99
     const adv1Safe = Math.max(1, adv1);
     const dec1Safe = Math.max(50, dec1);
     const oneDayRatioRaw = adv1Safe / dec1Safe;
@@ -220,17 +261,21 @@ export async function fetchBreadthData() {
     for (let j = Math.max(1, i - 4); j <= i; j++) { s5u += upCounts[j]; s5d += downCounts[j]; }
     for (let j = Math.max(1, i - 9); j <= i; j++) { s10u += upCounts[j]; s10d += downCounts[j]; }
     const fiveDayRatio = Math.min(99.99, s5u / Math.max(50, s5d)).toFixed(2);
-    const tenDayRatio = Math.min(99.99, s10u / Math.max(50, s10d)).toFixed(2);
+    const tenDayRatio  = Math.min(99.99, s10u / Math.max(50, s10d)).toFixed(2);
 
     // Up volume % (daily + 10d MA)
-    const upVolPct = upVolPctArr[i];
+    const upVolPct  = upVolPctArr[i];
     const upVolMa10 = Math.round(sma(upVolPctArr, 10, i));
 
     // % Above MAs
-    const above5dma  = pctAboveMA(i, 5);
-    const above20dma = pctAboveMA(i, 20);
-    const above50dma = pctAboveMA(i, 50);
+    const above5dma   = pctAboveMA(i, 5);
+    const above20dma  = pctAboveMA(i, 20);
+    const above40dma  = pctAboveMA(i, 40);
+    const above50dma  = pctAboveMA(i, 50);
     const above200dma = pctAboveMA(i, Math.min(200, i));
+
+    // New 20-day highs / lows %
+    const { high: new20dHighPct, low: new20dLowPct } = pctNew20dHighLow(i);
 
     // New Hi/Lo
     const advancing = Math.round(totalStocks * (0.3 + sectorsUp / 11 * 0.5));
@@ -240,7 +285,6 @@ export async function fetchBreadthData() {
     const netNewHighs = newHigh - newLow;
 
     // Net new highs 10d MA
-    // Build array of net new highs for last 10 days
     let nnhSum = 0, nnhCount = 0;
     for (let j = Math.max(1, i - 9); j <= i; j++) {
       const spyC2 = spy.closes[j], spyP2 = spy.closes[j - 1];
@@ -258,14 +302,14 @@ export async function fetchBreadthData() {
     const nhiloRatio = newHigh + newLow === 0 ? 0.5 : parseFloat((newHigh / (newHigh + newLow)).toFixed(2));
 
     // McClellan
-    const mcclellan = mcOsc[i];
+    const mcclellan    = mcOsc[i];
     const mclSummation = mcSum[i];
+    const namo         = namoArr[i] ?? 0;
 
     // ZBT tracker
     const zbtVal = parseFloat(zbtEma[i].toFixed(3));
-    // Detect if ZBT building: ema dropped below 0.40 in last 10 days and now rising toward 0.615
     let zbtBuilding = false;
-    let zbtProgress = 0; // 0-100
+    let zbtProgress = 0;
     if (zbtVal > 0.40 && zbtVal < 0.615) {
       for (let j = Math.max(0, i - 10); j < i; j++) {
         if (zbtEma[j] < 0.40) { zbtBuilding = true; break; }
@@ -274,7 +318,6 @@ export async function fetchBreadthData() {
         zbtProgress = Math.round(((zbtVal - 0.40) / (0.615 - 0.40)) * 100);
       }
     }
-    // ZBT triggered: crossed above 0.615 from below 0.40 within 10 days
     let zbtSignal = false;
     if (zbtVal >= 0.615) {
       for (let j = Math.max(0, i - 10); j < i; j++) {
@@ -282,17 +325,15 @@ export async function fetchBreadthData() {
       }
     }
 
-    // 3+ ATR overextended / washout
-    // Use SPY ATR as proxy: stocks 3+ ATR above/below 20d MA
+    // 3+ATR overextended / washout
     const spySlice = spy.closes.slice(Math.max(0, i - 19), i + 1).filter((v): v is number => v != null);
     const spyMa20 = spySlice.reduce((a, b) => a + b, 0) / spySlice.length;
     let atrSum = 0;
     for (let j = Math.max(1, i - 13); j <= i; j++) {
       atrSum += Math.abs((spy.closes[j] ?? 0) - (spy.closes[j - 1] ?? 0));
     }
-    const spyAtr = atrSum / 14;
+    const spyAtr  = atrSum / 14;
     const spyDist = ((spyClose - spyMa20) / spyAtr);
-    // Scale to stocks universe
     const atrOverextended = spyDist > 3 ? Math.round(totalStocks * 0.08 + spyDist * 50) :
                             spyDist > 2 ? Math.round(totalStocks * 0.04 + spyDist * 30) :
                             spyDist > 1 ? Math.round(totalStocks * 0.02) : 0;
@@ -303,26 +344,30 @@ export async function fetchBreadthData() {
     rows.push({
       date,
       // Group 1 — Core
-      oneDayRatio:      { value: oneDayRatio },
-      fiveDayRatio:     { value: fiveDayRatio },
-      upVolPct:         { value: upVolPct },
-      upVolMa10:        { value: upVolMa10 },
-      netNewHighs:      { value: netNewHighs },
-      netNewHighsMa10:  { value: netNewHighsMa10 },
+      oneDayRatio:     { value: oneDayRatio },
+      fiveDayRatio:    { value: fiveDayRatio },
+      upVolPct:        { value: upVolPct },
+      upVolMa10:       { value: upVolMa10 },
+      netNewHighs:     { value: netNewHighs },
+      netNewHighsMa10: { value: netNewHighsMa10 },
+      new20dHighPct:   { value: new20dHighPct },
+      new20dLowPct:    { value: new20dLowPct },
       // Group 2 — Regime
-      above5dma:        { value: above5dma },
-      above20dma:       { value: above20dma },
-      above50dma:       { value: above50dma },
-      above200dma:      { value: above200dma },
+      above5dma:       { value: above5dma },
+      above20dma:      { value: above20dma },
+      above40dma:      { value: above40dma },
+      above50dma:      { value: above50dma },
+      above200dma:     { value: above200dma },
       // Group 3 — Oscillators
-      mcclellan:        { value: mcclellan },
-      mclSummation:     { value: mclSummation },
-      nhiloRatio:       { value: nhiloRatio },
+      mcclellan:       { value: mcclellan },
+      namo:            { value: namo },
+      mclSummation:    { value: mclSummation },
+      nhiloRatio:      { value: nhiloRatio },
       // Group 4 — Thrust/Extremes
-      zbtVal:           { value: zbtVal, building: zbtBuilding, progress: zbtProgress, signal: zbtSignal },
-      atrOverextended:  { value: atrOverextended },
-      atrWashout:       { value: atrWashout },
-      // Legacy fields still used elsewhere
+      zbtVal:          { value: zbtVal, building: zbtBuilding, progress: zbtProgress, signal: zbtSignal },
+      atrOverextended: { value: atrOverextended },
+      atrWashout:      { value: atrWashout },
+      // Legacy fields
       stocksUp4Today:   { value: adv1 },
       stocksDown4Today: { value: dec1 },
       tenDayRatio:      { value: tenDayRatio },
@@ -336,21 +381,52 @@ export async function fetchBreadthData() {
   }
 
   // ── Cumulative A/D Line ──────────────────────────────────────────────────
-  const adLine: { date: string; ad: number; spy: number }[] = [];
+  const adLineFull: { date: string; ad: number; spy: number; div?: string }[] = [];
   let cumAD = 0;
   for (let i = 1; i < nDates; i++) {
     cumAD += Math.round((dailyAdv[i] - dailyDec[i]) * scaleFactor);
-    adLine.push({ date: allDates[i], ad: cumAD, spy: spy.closes[i] ?? 0 });
+    adLineFull.push({ date: allDates[i], ad: cumAD, spy: spy.closes[i] ?? 0 });
+  }
+
+  // Annotate divergence points on A/D line (for chart markers)
+  for (let k = 20; k < adLineFull.length; k++) {
+    const spyWindow = adLineFull.slice(k - 19, k + 1).map(d => {
+      const idx = spy.dates.indexOf(d.date);
+      return idx >= 0 ? (spy.closes[idx] ?? 0) : 0;
+    });
+    const adWindow = adLineFull.slice(k - 19, k + 1).map(d => d.ad);
+    const spyCur = spyWindow[spyWindow.length - 1];
+    const adCur  = adWindow[adWindow.length - 1];
+    const spyPrev = spyWindow.slice(0, -1);
+    const adPrev  = adWindow.slice(0, -1);
+    const spyMax  = Math.max(...spyPrev);
+    const spyMin  = Math.min(...spyPrev);
+    const adMax   = Math.max(...adPrev);
+    const adMin   = Math.min(...adPrev);
+    if (spyCur >= spyMax && adCur < adMax) {
+      adLineFull[k].div = "bearish";
+    } else if (spyCur <= spyMin && adCur > adMin) {
+      adLineFull[k].div = "bullish";
+    }
   }
 
   // ── Sector breadth heatmap ───────────────────────────────────────────────
   const latestIdx = nDates - 1;
+
   const sectorBreadth = sectorSyms.map(sym => {
     const c = chartMap[sym];
-    if (!c) return { sym, name: sectorNames[sym] ?? sym, ma5: 50, ma20: 50, ma50: 50, ma200: 50, adRatio5d: 1.0, netNewHighs: 0 };
+    if (!c) return {
+      sym, name: sectorNames[sym] ?? sym, dailyChg: 0,
+      ma5: 50, ma20: 50, ma40: 50, ma50: 50, ma200: 50,
+      adRatio5d: 1.0, netNewHighs: 0, new20dHigh: false, sectorScore: 50,
+    };
     const cidx = c.dates.indexOf(allDates[latestIdx]);
-    if (cidx < 0) return { sym, name: sectorNames[sym] ?? sym, ma5: 50, ma20: 50, ma50: 50, ma200: 50, adRatio5d: 1.0, netNewHighs: 0 };
-    // For sector, "above MA" is binary (just this one ETF) → show % of days above MA last 20d
+    if (cidx < 0) return {
+      sym, name: sectorNames[sym] ?? sym, dailyChg: 0,
+      ma5: 50, ma20: 50, ma40: 50, ma50: 50, ma200: 50,
+      adRatio5d: 1.0, netNewHighs: 0, new20dHigh: false, sectorScore: 50,
+    };
+
     function sectorDaysAboveMA(maPeriod: number): number {
       let above = 0, total = 0;
       for (let j = Math.max(maPeriod, cidx - 19); j <= cidx; j++) {
@@ -360,6 +436,7 @@ export async function fetchBreadthData() {
       }
       return total === 0 ? 50 : Math.round((above / total) * 100);
     }
+
     // 5d A/D ratio for this sector
     let su5 = 0, sd5 = 0;
     for (let j = Math.max(1, cidx - 4); j <= cidx; j++) {
@@ -368,28 +445,42 @@ export async function fetchBreadthData() {
       if (chg >= 0) su5++; else sd5++;
     }
     const adRatio5d = sd5 === 0 ? su5 : parseFloat((su5 / sd5).toFixed(2));
-    // Approximate net new highs for sector (% above 252d high proxy)
+
+    // Net new highs proxy
     const high252 = Math.max(...c.closes.slice(Math.max(0, cidx - 251), cidx + 1).filter((v): v is number => v != null));
     const isNearHigh = (c.closes[cidx] ?? 0) > high252 * 0.97 ? 1 : 0;
-    return {
-      sym,
-      name: sectorNames[sym] ?? sym,
-      ma5:   sectorDaysAboveMA(5),
-      ma20:  sectorDaysAboveMA(20),
-      ma50:  sectorDaysAboveMA(50),
-      ma200: cidx >= 200 ? sectorDaysAboveMA(200) : sectorDaysAboveMA(cidx),
-      adRatio5d,
-      netNewHighs: isNearHigh,
-    };
+
+    // New 20-day high for this sector ETF
+    const closes20 = c.closes.slice(Math.max(0, cidx - 19), cidx + 1).filter((v): v is number => v != null);
+    const max20 = closes20.length > 0 ? Math.max(...closes20) : (c.closes[cidx] ?? 0);
+    const new20dHigh = (c.closes[cidx] ?? 0) >= max20;
+
+    // Daily % change
+    const dailyChg = (cidx > 0 && c.closes[cidx] != null && c.closes[cidx - 1] != null)
+      ? parseFloat((((c.closes[cidx] - c.closes[cidx - 1]) / c.closes[cidx - 1]) * 100).toFixed(2))
+      : 0;
+
+    const ma5   = sectorDaysAboveMA(5);
+    const ma20  = sectorDaysAboveMA(20);
+    const ma40  = sectorDaysAboveMA(40);
+    const ma50  = sectorDaysAboveMA(50);
+    const ma200 = cidx >= 200 ? sectorDaysAboveMA(200) : sectorDaysAboveMA(cidx);
+
+    // Sector composite score (average of 5 MA metrics, 0-100)
+    const sectorScore = Math.round((ma5 + ma20 + ma40 + ma50 + ma200) / 5);
+
+    return { sym, name: sectorNames[sym] ?? sym, dailyChg, ma5, ma20, ma40, ma50, ma200, adRatio5d, netNewHighs: isNearHigh, new20dHigh, sectorScore };
   });
 
+  // Sort sectors by composite score descending (strongest breadth at top)
+  sectorBreadth.sort((a, b) => b.sectorScore - a.sectorScore);
 
-  // ── Percentile rank computation (trailing 252-day window) ─────────────────
-  // For each numeric column, compute where today's value ranks in the history
+  // ── Percentile rank computation (trailing history window) ─────────────────
   const PCTILE_COLS = [
     "oneDayRatio","fiveDayRatio","upVolPct","upVolMa10","netNewHighs","netNewHighsMa10",
-    "above5dma","above20dma","above50dma","above200dma",
-    "mcclellan","mclSummation","nhiloRatio","zbtVal","atrOverextended","atrWashout"
+    "new20dHighPct","new20dLowPct",
+    "above5dma","above20dma","above40dma","above50dma","above200dma",
+    "mcclellan","namo","mclSummation","nhiloRatio","zbtVal","atrOverextended","atrWashout"
   ] as const;
 
   function percentileRank(arr: number[], val: number): number {
@@ -398,7 +489,6 @@ export async function fetchBreadthData() {
     return Math.round((below / arr.length) * 100);
   }
 
-  // Build history arrays (rows are newest-first; use all available rows as history)
   const colHistory: Record<string, number[]> = {};
   for (const col of PCTILE_COLS) {
     colHistory[col] = rows.map((rr: any) => {
@@ -407,7 +497,6 @@ export async function fetchBreadthData() {
     }).filter((v: number) => !isNaN(v));
   }
 
-  // Annotate each row with percentile ranks
   for (const row of rows) {
     for (const col of PCTILE_COLS) {
       const rawVal = row[col]?.value;
@@ -422,19 +511,45 @@ export async function fetchBreadthData() {
   const latestRow = rows[0] ?? {};
   const zbtStatus = latestRow.zbtVal ?? { value: 0, building: false, progress: 0, signal: false };
 
-  // ── Composite breadth score — PERCENTILE RANK METHOD ────────────────────
-  // For each of the 6 inputs, compute its percentile rank over all available history.
-  // Percentile rank = % of historical values that are LESS THAN the current value → 0..100.
-  // Average the six percentile ranks → composite score is guaranteed 0..100.
-  // Inputs: fiveDayRatio, upVolPct (daily), above50dma, mcclellan, nhiloRatio, netNewHighs
+  // ── Thrust conditions checklist ───────────────────────────────────────────
+  const t2108Now  = latestRow.above40dma?.value ?? 50;
+  const upVolNow  = latestRow.upVolPct?.value ?? 50;
+  const mcNow     = latestRow.mcclellan?.value ?? 0;
+  const whaleyNow = whaleyStreak[nDates - 1] ?? 0;
 
-  // Build history arrays for the 6 composite inputs from all rows
-  const hist_r5    = rows.map((rr: any) => parseFloat(rr.fiveDayRatio?.value ?? "1")).filter(v => !isNaN(v));
-  const hist_uv    = rows.map((rr: any) => rr.upVolPct?.value ?? 50).filter((v: number) => !isNaN(v));
+  // Divergence: SPY vs McClellan over last 5 trading days
+  let divType = "none";
+  if (rows.length >= 5) {
+    const spyIdx0 = spy.dates.indexOf(rows[0]?.date ?? "");
+    const spyIdx4 = spy.dates.indexOf(rows[4]?.date ?? "");
+    const spyCur2  = spyIdx0 >= 0 ? (spy.closes[spyIdx0] ?? 0) : 0;
+    const spy5d2   = spyIdx4 >= 0 ? (spy.closes[spyIdx4] ?? spyCur2) : spyCur2;
+    const mc5d2    = rows[4]?.mcclellan?.value ?? mcNow;
+    if (spyCur2 > spy5d2 * 1.005 && mcNow < mc5d2 - 25) divType = "bearish";
+    else if (spyCur2 < spy5d2 * 0.995 && mcNow > mc5d2 + 25) divType = "bullish";
+  }
+
+  const thrustChecks = {
+    zbt: {
+      signal:   zbtStatus.signal,
+      building: zbtStatus.building,
+      progress: zbtStatus.progress,
+      value:    zbtStatus.value,
+    },
+    upVol90:      { active: upVolNow >= 90, value: upVolNow },
+    whaley:       { active: whaleyNow >= 2, streak: whaleyNow },
+    t2108Washout: { active: t2108Now < 8, value: t2108Now },
+    divergence:   { type: divType, nymo: mcNow },
+  };
+
+  // ── Composite breadth score — 7-INPUT PERCENTILE RANK METHOD ───────────────
+  const hist_r5    = rows.map((rr: any) => parseFloat(rr.fiveDayRatio?.value ?? "1")).filter((v: number) => !isNaN(v));
+  const hist_uvma  = rows.map((rr: any) => rr.upVolMa10?.value ?? 50).filter((v: number) => !isNaN(v));
+  const hist_a40   = rows.map((rr: any) => rr.above40dma?.value ?? 50).filter((v: number) => !isNaN(v));
   const hist_a50   = rows.map((rr: any) => rr.above50dma?.value ?? 50).filter((v: number) => !isNaN(v));
   const hist_mc    = rows.map((rr: any) => rr.mcclellan?.value ?? 0).filter((v: number) => !isNaN(v));
   const hist_hilo  = rows.map((rr: any) => rr.nhiloRatio?.value ?? 0.5).filter((v: number) => !isNaN(v));
-  const hist_nnh   = rows.map((rr: any) => rr.netNewHighs?.value ?? 0).filter((v: number) => !isNaN(v));
+  const hist_nnhma = rows.map((rr: any) => rr.netNewHighsMa10?.value ?? 0).filter((v: number) => !isNaN(v));
 
   function pctRank(history: number[], val: number): number {
     if (history.length === 0) return 50;
@@ -444,75 +559,78 @@ export async function fetchBreadthData() {
 
   function calcCompositeForRow(rr: any): number {
     const v1 = parseFloat(rr.fiveDayRatio?.value ?? "1");
-    const v2 = rr.upVolPct?.value ?? 50;
-    const v3 = rr.above50dma?.value ?? 50;
-    const v4 = rr.mcclellan?.value ?? 0;
-    const v5 = rr.nhiloRatio?.value ?? 0.5;
-    const v6 = rr.netNewHighs?.value ?? 0;
-    const p1 = pctRank(hist_r5,   v1);
-    const p2 = pctRank(hist_uv,   v2);
-    const p3 = pctRank(hist_a50,  v3);
-    const p4 = pctRank(hist_mc,   v4);
-    const p5 = pctRank(hist_hilo, v5);
-    const p6 = pctRank(hist_nnh,  v6);
-    return Math.round((p1 + p2 + p3 + p4 + p5 + p6) / 6);
+    const v2 = rr.upVolMa10?.value ?? 50;
+    const v3 = rr.above40dma?.value ?? 50;
+    const v4 = rr.above50dma?.value ?? 50;
+    const v5 = rr.mcclellan?.value ?? 0;
+    const v6 = rr.nhiloRatio?.value ?? 0.5;
+    const v7 = rr.netNewHighsMa10?.value ?? 0;
+    return Math.round((pctRank(hist_r5, v1) + pctRank(hist_uvma, v2) + pctRank(hist_a40, v3) +
+      pctRank(hist_a50, v4) + pctRank(hist_mc, v5) + pctRank(hist_hilo, v6) + pctRank(hist_nnhma, v7)) / 7);
   }
 
   const r = latestRow;
   const compositeScore = Math.max(0, Math.min(100, calcCompositeForRow(r)));
 
-  // Score history: compute composite for last 7 rows (for trend sparkline)
-  const scoreHistory: number[] = rows.slice(0, 7).map((rr: any) =>
+  // Score history: composite for last 60 rows (for mini histogram + sparkline + trend)
+  const scoreHistory: number[] = rows.slice(0, 60).map((rr: any) =>
     Math.max(0, Math.min(100, calcCompositeForRow(rr)))
   );
-  const trend5d = scoreHistory.length >= 5
-    ? compositeScore - scoreHistory[4]
-    : 0;
+  const trend5d = scoreHistory.length >= 5 ? compositeScore - scoreHistory[4] : 0;
 
-  // ── Regime summary text ──────────────────────────────────────────────────
-  const mcv = r.mcclellan?.value ?? 0;
-  const a20 = r.above20dma?.value ?? 50;
-  const a50 = r.above50dma?.value ?? 50;
-  const r5  = parseFloat(r.fiveDayRatio?.value ?? "1");
+  // ── Regime summary text ────────────────────────────────────────────────────
+  const rising  = trend5d > 3;
+  const falling = trend5d < -3;
   let regimeSummary = "";
-  if (compositeScore >= 80) {
+  if (compositeScore > 75 && rising) {
     regimeSummary = "Thrust-level breadth expansion — nearly all indicators aligned bullish. Favor aggressive long exposure and momentum breakouts.";
+  } else if (compositeScore >= 60 && compositeScore <= 75 && rising) {
+    regimeSummary = "Breadth healthy and improving — standard long swing setups in play.";
+  } else if (compositeScore >= 60 && compositeScore <= 75 && falling) {
+    regimeSummary = "Breadth still positive but momentum fading — be selective, tighten stops on existing longs.";
+  } else if (compositeScore >= 40 && compositeScore < 60) {
+    regimeSummary = "Breadth mixed — no clear directional edge. Reduce position sizing, avoid forcing trades.";
+  } else if (compositeScore >= 25 && compositeScore < 40 && falling) {
+    regimeSummary = "Breadth deteriorating broadly. Distribution underway — avoid new longs, consider hedges or reduced exposure.";
+  } else if (compositeScore < 25) {
+    regimeSummary = "Breadth in washout territory — oversold extremes suggest mean reversion bounce setup within 1-5 days.";
   } else if (compositeScore >= 65) {
-    if (mcv >= 100) regimeSummary = "Breadth expanding broadly with thrust conditions building — favor long swing setups, add on pullbacks to rising MAs.";
-    else regimeSummary = "Broad market participation improving. Breadth healthy but not extreme — stick to A+ setups, size normally.";
+    regimeSummary = "Breadth positive and stable — standard long swing setups in play. Monitor for continuation.";
   } else if (compositeScore >= 50) {
-    if (trend5d > 8) regimeSummary = "Breadth recovering from weakness — early-stage improvement. Watch for follow-through above 50% thresholds before adding exposure.";
-    else if (trend5d < -8) regimeSummary = "Breadth deteriorating under the surface despite index strength — reduce exposure, tighten stops on longs.";
-    else regimeSummary = "Mixed breadth environment. No edge in either direction — trade only the highest conviction setups at reduced size.";
-  } else if (compositeScore >= 30) {
-    if (a20 < 20) regimeSummary = "Washout conditions present — over 80% of stocks below 20-day MA. Oversold mean reversion bounce likely within 1-3 days.";
-    else if (mcv < -100) regimeSummary = "McClellan deeply oversold. Breadth deterioration extreme — defensive posture, watch for capitulation reversal signal.";
-    else regimeSummary = "Breadth deteriorating broadly. Distribution underway — avoid new longs, consider hedges or reduced exposure.";
+    regimeSummary = "Breadth mixed — no clear directional edge. Trade only the highest conviction setups at reduced size.";
   } else {
-    if (mcv < -150) regimeSummary = "Extreme breadth collapse — McClellan below -150, washout conditions. High probability mean reversion setup forming. Watch for reversal.";
-    else regimeSummary = "Extremely weak breadth across all timeframes. Avoid longs entirely. Only trade with the tape if confirmed reversal signals emerge.";
+    regimeSummary = "Breadth deteriorating broadly — reduce exposure, focus on capital preservation.";
   }
 
   // ── Header summary bar ───────────────────────────────────────────────────
   const latest = rows[0] ?? {};
   const headerSummary = {
-    advancing: latest.advancing ?? 0,
+    advancing:    latest.advancing ?? 0,
     advancingPct: latest.advancing ? ((latest.advancing / totalStocks) * 100).toFixed(1) : "0.0",
-    declining: latest.declining ?? 0,
+    declining:    latest.declining ?? 0,
     decliningPct: latest.declining ? ((latest.declining / totalStocks) * 100).toFixed(1) : "0.0",
-    newHigh: latest.newHigh ?? 0,
-    newHighPct: latest.newHigh ? ((latest.newHigh / totalStocks) * 100).toFixed(1) : "0.0",
-    newLow: latest.newLow ?? 0,
-    newLowPct: latest.newLow ? ((latest.newLow / totalStocks) * 100).toFixed(1) : "0.0",
+    newHigh:      latest.newHigh ?? 0,
+    newHighPct:   latest.newHigh ? ((latest.newHigh / totalStocks) * 100).toFixed(1) : "0.0",
+    newLow:       latest.newLow ?? 0,
+    newLowPct:    latest.newLow ? ((latest.newLow / totalStocks) * 100).toFixed(1) : "0.0",
   };
+
+  const adLine = adLineFull.slice(-130);
+  const mcLineStart = Math.max(0, nDates - 130);
 
   const result = {
     rows,
     headerSummary,
     composite: { score: compositeScore, trend5d, regimeSummary, scoreHistory },
+    thrustChecks,
     sectorBreadth,
-    adLine: adLine.slice(-90), // last 60 days for chart
-    mcLine: mcOsc.slice(-90).map((v, i2) => ({ date: allDates[Math.max(0, nDates - 90) + i2] ?? "", osc: v, sum: mcSum[Math.max(0, nDates - 90) + i2] ?? 0 })),
+    adLine,
+    mcLine: mcOsc.slice(-130).map((v, i2) => ({
+      date: allDates[mcLineStart + i2] ?? "",
+      osc:  v,
+      sum:  mcSum[mcLineStart + i2] ?? 0,
+      namo: namoArr[mcLineStart + i2] ?? 0,
+    })),
     zbtStatus,
     timestamp: new Date().toISOString(),
   };
@@ -562,7 +680,6 @@ export async function fetchSetupsData(customPatterns?: any[]) {
   const cached = getCached("setups_full");
   if (cached && !customPatterns) return cached;
 
-  // Fetch real prices in batches of 10
   const BATCH = 10;
   const priceMap: Record<string, number> = {};
   const closesMap: Record<string, number[]> = {};
@@ -607,54 +724,43 @@ export async function fetchSetupsData(customPatterns?: any[]) {
     if (Math.random() < 0.35) continue;
 
     const closes = closesMap[ticker] ?? [];
-    const price = priceMap[ticker] ?? null;
+    const price  = priceMap[ticker] ?? null;
     if (!price || closes.length < 5) continue;
 
     const prevPrice = closes[closes.length - 2] ?? price;
     const realGapPct = ((price - prevPrice) / prevPrice) * 100;
 
-    // Calculate real volume ratio if we have data
     const recentVols = closes.slice(-5).map((_, i, arr) => Math.abs(arr[i] - (arr[i - 1] ?? arr[i])));
-    const avgVol = recentVols.reduce((a, b) => a + b, 0) / recentVols.length || 1;
+    const avgVol  = recentVols.reduce((a, b) => a + b, 0) / recentVols.length || 1;
     const todayVol = Math.abs(price - prevPrice);
     const volRatio = Math.max(0.5, Math.min(10, (todayVol / avgVol) * (0.8 + Math.random() * 1.5)));
 
-    // Pattern detection — rule-based heuristics on real close data
     let pattern: string;
     let confidence: number;
 
-    const ma10 = closes.slice(-10).reduce((a, b) => a + b, 0) / 10;
-    const ma20 = closes.length >= 20 ? closes.slice(-20).reduce((a, b) => a + b, 0) / 20 : ma10;
-    const trend5 = ((closes[closes.length - 1] - closes[closes.length - 6]) / closes[closes.length - 6]) * 100;
+    const ma10   = closes.slice(-10).reduce((a, b) => a + b, 0) / 10;
+    const ma20   = closes.length >= 20 ? closes.slice(-20).reduce((a, b) => a + b, 0) / 20 : ma10;
+    const trend5  = ((closes[closes.length - 1] - closes[closes.length - 6]) / closes[closes.length - 6]) * 100;
     const trend20 = closes.length >= 20 ? ((closes[closes.length - 1] - closes[closes.length - 21]) / closes[closes.length - 21]) * 100 : 0;
 
     if (realGapPct > 5 && price > ma20) {
-      pattern = "Power Earnings Gap";
-      confidence = Math.floor(75 + Math.min(20, realGapPct * 2));
+      pattern = "Power Earnings Gap"; confidence = Math.floor(75 + Math.min(20, realGapPct * 2));
     } else if (realGapPct < -5 && price < ma20) {
-      pattern = "Earnings Failure Gap";
-      confidence = Math.floor(75 + Math.min(20, Math.abs(realGapPct) * 2));
+      pattern = "Earnings Failure Gap"; confidence = Math.floor(75 + Math.min(20, Math.abs(realGapPct) * 2));
     } else if (trend5 > 3 && trend20 > 8 && price > ma10) {
-      pattern = "High Tight Flag";
-      confidence = Math.floor(70 + Math.random() * 20);
+      pattern = "High Tight Flag"; confidence = Math.floor(70 + Math.random() * 20);
     } else if (trend20 > 5 && price > ma20 && Math.abs(trend5) < 2) {
-      pattern = "Bull Flag";
-      confidence = Math.floor(65 + Math.random() * 25);
+      pattern = "Bull Flag"; confidence = Math.floor(65 + Math.random() * 25);
     } else if (trend20 < -5 && price < ma20 && Math.abs(trend5) < 2) {
-      pattern = "Bear Flag";
-      confidence = Math.floor(65 + Math.random() * 25);
+      pattern = "Bear Flag"; confidence = Math.floor(65 + Math.random() * 25);
     } else if (trend20 > 3 && price > ma20) {
-      pattern = "Flat Base Breakout";
-      confidence = Math.floor(60 + Math.random() * 30);
+      pattern = "Flat Base Breakout"; confidence = Math.floor(60 + Math.random() * 30);
     } else if (trend20 < -8 && price < ma10) {
-      pattern = "Parabolic Short";
-      confidence = Math.floor(60 + Math.random() * 25);
+      pattern = "Parabolic Short"; confidence = Math.floor(60 + Math.random() * 25);
     } else {
-      pattern = "Double Top";
-      confidence = Math.floor(55 + Math.random() * 30);
+      pattern = "Double Top"; confidence = Math.floor(55 + Math.random() * 30);
     }
 
-    // Check if custom pattern matches this ticker
     if (customPatterns?.length) {
       for (const cp of customPatterns) {
         const matches = evaluateCustomPattern(cp, { price, closes, trend5, trend20, ma10, ma20, realGapPct });
@@ -666,16 +772,12 @@ export async function fetchSetupsData(customPatterns?: any[]) {
     const gapHeld = price > prevPrice ? Math.random() > 0.3 : Math.random() > 0.6;
 
     setups.push({
-      id: id++,
-      ticker,
-      pattern,
-      confidence,
-      price: Math.round(price * 100) / 100,
-      gapPct: Math.round(realGapPct * 100) / 100,
+      id: id++, ticker, pattern, confidence,
+      price:    Math.round(price * 100) / 100,
+      gapPct:   Math.round(realGapPct * 100) / 100,
       volRatio: Math.round(volRatio * 10) / 10,
-      daysAgo,
-      gapHeld,
-      closes: closes.slice(-30), // last 30 days for mini chart
+      daysAgo, gapHeld,
+      closes: closes.slice(-30),
     });
   }
 
@@ -692,7 +794,6 @@ export async function fetchSetupsData(customPatterns?: any[]) {
 }
 
 function evaluateCustomPattern(pattern: any, data: any): boolean {
-  // Simple rule evaluator for custom patterns
   try {
     const { priceAboveMa, priceAboveMaWindow, minTrend5, maxTrend5, minGapPct, maxGapPct } = pattern;
     if (priceAboveMa !== undefined) {
@@ -711,7 +812,6 @@ function evaluateCustomPattern(pattern: any, data: any): boolean {
 }
 
 // ── 10x ATR Extended scanner ────────────────────────────────────────────────
-// Returns tickers from SETUP_TICKERS where |close - sma20| > 10 * ATR(14)
 export async function getAtrExtendedTickers(): Promise<{ tickers: { symbol: string; close: number; sma20: number; atr: number; extension: number; direction: "above" | "below" }[]; count: number }> {
   const cacheKey = "atr_extended_tickers";
   const cached = getCached(cacheKey);
@@ -728,16 +828,13 @@ export async function getAtrExtendedTickers(): Promise<{ tickers: { symbol: stri
         if (closes.length < 22) return;
 
         const validCloses = closes.filter((c): c is number => c != null && !isNaN(c));
-        const validHighs = highs.filter((h): h is number => h != null && !isNaN(h));
-        const validLows = lows.filter((l): l is number => l != null && !isNaN(l));
+        const validHighs  = highs.filter((h): h is number => h != null && !isNaN(h));
+        const validLows   = lows.filter((l): l is number => l != null && !isNaN(l));
         if (validCloses.length < 22) return;
 
         const last = validCloses.length - 1;
-
-        // SMA(20)
         const sma20 = validCloses.slice(last - 19, last + 1).reduce((a, b) => a + b, 0) / 20;
 
-        // ATR(14) — true range average
         let atrSum = 0;
         const atrLen = Math.min(14, last);
         for (let i = last - atrLen + 1; i <= last; i++) {
@@ -749,16 +846,15 @@ export async function getAtrExtendedTickers(): Promise<{ tickers: { symbol: stri
           atrSum += tr;
         }
         const atr = atrSum / atrLen;
-
         const close = validCloses[last];
         const extension = Math.abs(close - sma20) / atr;
 
         if (extension >= 10) {
           results.push({
             symbol,
-            close: Math.round(close * 100) / 100,
-            sma20: Math.round(sma20 * 100) / 100,
-            atr: Math.round(atr * 100) / 100,
+            close:     Math.round(close * 100) / 100,
+            sma20:     Math.round(sma20 * 100) / 100,
+            atr:       Math.round(atr * 100) / 100,
             extension: Math.round(extension * 10) / 10,
             direction: close > sma20 ? "above" : "below",
           });
@@ -769,9 +865,7 @@ export async function getAtrExtendedTickers(): Promise<{ tickers: { symbol: stri
     })
   );
 
-  // Sort by extension descending
   results.sort((a, b) => b.extension - a.extension);
-
   const result = { tickers: results, count: results.length };
   setCached(cacheKey, result);
   return result;
