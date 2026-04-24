@@ -235,7 +235,7 @@ async function refreshSnapshot(underlying: string): Promise<void> {
 export type AggressorSide = "ask" | "bid" | "mid" | "unknown";
 export type AggressorConfidence = "high" | "medium" | "low";
 
-function tagAggressor(
+export function tagAggressor(
   price: number,
   bid: number,
   ask: number,
@@ -276,7 +276,7 @@ function tagAggressor(
 
 // ── DTE Calculator ────────────────────────────────────────────────────────────
 
-function calcDte(expiry: string): number {
+export function calcDte(expiry: string): number {
   // Options formally expire at market close (4pm ET ≈ 20:00 UTC) on expiry date.
   const expiryMs = new Date(`${expiry}T20:00:00Z`).getTime();
   return Math.max(0, Math.ceil((expiryMs - Date.now()) / 86_400_000));

@@ -61,6 +61,8 @@ export const optionsTrades = sqliteTable("options_trades", {
   dte:                 integer("dte"),                       // calendar days to expiry
   // Populated in Layer 3 (needs underlying spot price)
   otmPct:              real("otm_pct"),                      // % out-of-the-money (0 if ATM/ITM)
+  // "live" = ingested from WebSocket; "backfill" = loaded from Polygon historical REST API
+  source:              text("source").default("live"),
 });
 
 // Point-in-time NBBO snapshots stored for audit trail and later aggressor re-scoring.
