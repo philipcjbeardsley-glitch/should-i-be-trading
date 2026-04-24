@@ -1,5 +1,7 @@
 import type { Express } from "express";
 import type { Server } from "http";
+import { flowRouter } from "./flowRoutes";
+import { startFlowIngestion } from "./flowWs";
 import { fetchAllMarketData } from "./marketData";
 import { fetchMacroIntelligence } from "./macroData";
 import { fetchThemeTrackerData, fetchSectorSnapshot, fetchCOTData } from "./themeData";
@@ -35,6 +37,17 @@ let lastCOTFetch = 0;
 const COT_CACHE_TTL = 300 * 1000; // 5 min
 
 export async function registerRoutes(httpServer: Server, app: Express) {
+  // ── Options Flow Scanner routes ──────────────────────────────────────────
+  app.use("/api/flow", flowRouter);
+
+  // Start ingestion for configured underlyings.
+  // Layer 1: INTC only for testing. Expand via FLOW_UNDERLYINGS env var.
+  // e.g. FLOW_UNDERLYINGS=INTC,NVDA,AMD
+  const flowUnderlyings = process.env.FLOW_UNDERLYINGS
+    ? process.env.FLOW_UNDERLYINGS.split(",").map(s => s.trim()).filter(Boolean)
+    : ["INTC"];
+  startFlowIngestion(flowUnderlyings);
+
   // Original dashboard endpoint
   app.get("/api/dashboard", async (req, res) => {
     try {

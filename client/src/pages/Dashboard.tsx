@@ -1,13 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useState, useEffect } from "react";
-import { RefreshCw, Activity, TrendingUp, TrendingDown, Minus, AlertTriangle, Zap, BarChart2, Globe, Layers, Brain, LineChart, Grid3x3, Crosshair } from "lucide-react";
+import { RefreshCw, Activity, TrendingUp, TrendingDown, Minus, AlertTriangle, Zap, BarChart2, Globe, Layers, Brain, LineChart, Grid3x3, Crosshair, Telescope } from "lucide-react";
 import MacroIntelligence from "@/components/MacroIntelligence";
 import ThemeTracker from "@/components/ThemeTracker";
 import BreadthTab from "@/components/BreadthTab";
 import SetupsTab from "@/components/SetupsTab";
 import HistoricalExpectancy from "@/components/HistoricalExpectancy";
 import ChartEngine from "@/components/ChartEngine";
+import FlowTab from "@/components/FlowTab";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 interface SectorData {
@@ -28,7 +29,7 @@ interface DashboardData {
   cached?: boolean;
 }
 
-type MainTab = "pulse" | "macro" | "themes" | "breadth" | "setups" | "expectancy" | "charts";
+type MainTab = "pulse" | "macro" | "themes" | "breadth" | "setups" | "expectancy" | "charts" | "flow";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 const SECTOR_NAMES: Record<string, string> = {
@@ -241,6 +242,7 @@ const TABS: { key: MainTab; label: string; icon: React.ReactNode }[] = [
   { key: "setups", label: "Setups", icon: <Crosshair size={12} /> },
   { key: "expectancy", label: "Hist. Expectancy", icon: <BarChart2 size={12} /> },
   { key: "charts", label: "Chart Engine", icon: <Layers size={12} /> },
+  { key: "flow",   label: "Flow",         icon: <Telescope size={12} /> },
 ];
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
@@ -604,6 +606,9 @@ export default function Dashboard() {
             <ChartEngine />
           </div>
         )}
+
+        {/* Options Flow tab */}
+        {activeTab === "flow" && <FlowTab />}
       </div>
 
       {/* ── Footer ── */}
