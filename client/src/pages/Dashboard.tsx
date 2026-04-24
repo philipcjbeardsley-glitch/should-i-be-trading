@@ -235,14 +235,14 @@ type TradingMode = "swing" | "day";
 
 // ─── Tab Config ───────────────────────────────────────────────────────────────
 const TABS: { key: MainTab; label: string; icon: React.ReactNode }[] = [
-  { key: "pulse", label: "Market Pulse", icon: <Activity size={12} /> },
-  { key: "macro", label: "Macro Intelligence", icon: <Brain size={12} /> },
-  { key: "themes", label: "Theme Tracker", icon: <LineChart size={12} /> },
-  { key: "breadth", label: "Breadth", icon: <Grid3x3 size={12} /> },
-  { key: "setups", label: "Setups", icon: <Crosshair size={12} /> },
-  { key: "expectancy", label: "Hist. Expectancy", icon: <BarChart2 size={12} /> },
-  { key: "charts", label: "Chart Engine", icon: <Layers size={12} /> },
-  { key: "flow",   label: "Flow",         icon: <Telescope size={12} /> },
+  { key: "pulse",      label: "Pulse",       icon: <Activity size={12} /> },
+  { key: "macro",      label: "Macro",       icon: <Brain size={12} /> },
+  { key: "themes",     label: "Themes",      icon: <LineChart size={12} /> },
+  { key: "breadth",    label: "Breadth",     icon: <Grid3x3 size={12} /> },
+  { key: "setups",     label: "Setups",      icon: <Crosshair size={12} /> },
+  { key: "expectancy", label: "Expectancy",  icon: <BarChart2 size={12} /> },
+  { key: "charts",     label: "Charts",      icon: <Layers size={12} /> },
+  { key: "flow",       label: "Flow",        icon: <Telescope size={12} /> },
 ];
 
 // ─── Main Dashboard ───────────────────────────────────────────────────────────
@@ -357,7 +357,7 @@ export default function Dashboard() {
       )}
 
       {/* ── Tab Navigation ── */}
-      <div style={{ background: "hsl(220 22% 7%)", borderBottom: "1px solid var(--bb-border)", padding: "0 14px", display: "flex", gap: 0, flexShrink: 0, overflowX: "auto" }}>
+      <div style={{ background: "hsl(220 22% 7%)", borderBottom: "1px solid var(--bb-border)", padding: "0 14px", display: "flex", gap: 0, flexShrink: 0, overflowX: "auto", scrollbarWidth: "none" }}>
         {TABS.map(tab => (
           <button
             key={tab.key}
