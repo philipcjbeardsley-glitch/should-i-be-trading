@@ -52,6 +52,25 @@ interface StatusPayload {
   sseClients: number;
 }
 
+interface HealthUnderlying {
+  underlying: string;
+  snapshotCacheSize: number;
+  lastFetchStatus: "ok" | "error" | "never";
+  lastFetchAgoSec: number | null;
+  lastError: string | null;
+}
+
+interface HealthPayload {
+  wsState: string;
+  wsReconnectCount: number;
+  tradesReceivedLastHour: number;
+  snapshotCacheSizeTotal: number;
+  polygonKeySet: boolean;
+  polygonKeyPrefix: string | null;
+  underlyings: HealthUnderlying[];
+  timestamp: string;
+}
+
 // ── Color helpers ─────────────────────────────────────────────────────────────
 
 function aggressorColor(side: string, right: string): string {
@@ -229,6 +248,17 @@ export default function FlowTab() {
     queryKey: ["/api/flow/status"],
     queryFn: async () => {
       const res = await apiRequest("GET", "/api/flow/status");
+      return res.json();
+    },
+    refetchInterval: 15_000,
+    staleTime: 10_000,
+  });
+
+  // ── Health endpoint ────────────────────────────────────────────────────────
+  const { data: healthData, refetch: refetchHealth } = useQuery<HealthPayload>({
+    queryKey: ["/api/flow/health"],
+    queryFn: async () => {
+      const res = await apiRequest("GET", "/api/flow/health");
       return res.json();
     },
     refetchInterval: 15_000,
@@ -424,33 +454,104 @@ export default function FlowTab() {
         </div>
       </div>
 
-      {/* ── Snapshot / WS debug panel ── */}
-      {effectiveStatus && (
-        <div style={{
-          marginTop: 16, padding: "8px 12px",
-          background: "#060b14", border: "1px solid #0d1829", borderRadius: 3,
-        }}>
-          <div style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#334155", letterSpacing: "0.12em", marginBottom: 4 }}>
+      {/* ── Health / diagnostics panel ── */}
+      <div style={{
+        marginTop: 16, padding: "8px 12px",
+        background: "#060b14", border: "1px solid #0d1829", borderRadius: 3,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+          <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#334155", letterSpacing: "0.12em" }}>
             SYSTEM DIAGNOSTICS
+          </span>
+          <button onClick={() => refetchHealth()} style={{
+            fontFamily: "IBM Plex Mono, monospace", fontSize: 7, padding: "1px 5px",
+            background: "#0d1829", border: "1px solid #1e3a5f", borderRadius: 2,
+            color: "#475569", cursor: "pointer",
+          }}>↻</button>
+        </div>
+
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+          {/* WS state */}
+          <div>
+            <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>WS STATE: </span>
+            <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: wsStateColor(healthData?.wsState ?? effectiveStatus?.state ?? "disconnected") }}>
+              {(healthData?.wsState ?? effectiveStatus?.state ?? "—").toUpperCase()}
+            </span>
           </div>
-          <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+
+          {/* Reconnect count */}
+          {healthData && (
             <div>
-              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>WS STATE: </span>
-              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: wsStateColor(effectiveStatus.state) }}>{effectiveStatus.state}</span>
+              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>RECONNECTS: </span>
+              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: healthData.wsReconnectCount > 0 ? "#fbbf24" : "#475569" }}>
+                {healthData.wsReconnectCount}
+              </span>
             </div>
+          )}
+
+          {/* Trades last hour */}
+          {healthData && (
             <div>
-              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>SNAPSHOT CACHE: </span>
-              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#94a3b8" }}>{effectiveStatus.snapshotCacheSize} contracts</span>
+              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>TRADES/HR: </span>
+              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#94a3b8" }}>
+                {healthData.tradesReceivedLastHour.toLocaleString()}
+              </span>
             </div>
-            {Object.entries(effectiveStatus.snapshotLastRefresh).map(([u, age]) => (
-              <div key={u}>
-                <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>SNAP {u}: </span>
-                <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>{age}</span>
+          )}
+
+          {/* Polygon key */}
+          {healthData && (
+            <div>
+              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>API KEY: </span>
+              <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: healthData.polygonKeySet ? "#4ade80" : "#f87171" }}>
+                {healthData.polygonKeySet ? healthData.polygonKeyPrefix : "NOT SET"}
+              </span>
+            </div>
+          )}
+
+          {/* Total snapshot cache size */}
+          <div>
+            <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>SNAP CACHE: </span>
+            <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: (healthData?.snapshotCacheSizeTotal ?? effectiveStatus?.snapshotCacheSize ?? 0) > 0 ? "#4ade80" : "#f87171" }}>
+              {(healthData?.snapshotCacheSizeTotal ?? effectiveStatus?.snapshotCacheSize ?? 0)} contracts
+            </span>
+          </div>
+        </div>
+
+        {/* Per-underlying detail rows */}
+        {healthData?.underlyings && healthData.underlyings.length > 0 && (
+          <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>
+            {healthData.underlyings.map(u => (
+              <div key={u.underlying} style={{
+                display: "flex", alignItems: "flex-start", gap: 12,
+                padding: "4px 8px",
+                background: u.lastFetchStatus === "error" ? "rgba(248,113,113,0.05)" : "rgba(0,0,0,0.2)",
+                border: `1px solid ${u.lastFetchStatus === "error" ? "rgba(248,113,113,0.2)" : "#0d1829"}`,
+                borderRadius: 2,
+              }}>
+                {/* Status dot */}
+                <span style={{ width: 6, height: 6, borderRadius: "50%", marginTop: 1, flexShrink: 0,
+                  background: u.lastFetchStatus === "ok" ? "#4ade80" : u.lastFetchStatus === "error" ? "#f87171" : "#334155",
+                  display: "inline-block"}} />
+                <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, fontWeight: 700, color: "#94a3b8", minWidth: 40 }}>
+                  {u.underlying}
+                </span>
+                <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#475569" }}>
+                  {u.snapshotCacheSize} contracts
+                </span>
+                <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#334155" }}>
+                  {u.lastFetchAgoSec != null ? `last fetch ${u.lastFetchAgoSec}s ago` : "never fetched"}
+                </span>
+                {u.lastError && (
+                  <span style={{ fontFamily: "IBM Plex Mono, monospace", fontSize: 8, color: "#f87171", wordBreak: "break-all" }}>
+                    ERROR: {u.lastError}
+                  </span>
+                )}
               </div>
             ))}
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }

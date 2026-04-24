@@ -18,7 +18,7 @@
  */
 
 import { Router, type Request, type Response } from "express";
-import { onTrade, offTrade, getWsStatus, type EnrichedTrade } from "./flowWs";
+import { onTrade, offTrade, getWsStatus, getWsHealth, type EnrichedTrade } from "./flowWs";
 import {
   getRecentTrades,
   getTodayTopTrades,
@@ -65,6 +65,21 @@ function broadcastTrade(trade: EnrichedTrade): void {
 onTrade(broadcastTrade);
 
 // ── Routes ────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/flow/health
+ * Detailed diagnostic endpoint: snapshot cache state, last fetch status/error,
+ * trades received in the last hour, WS reconnect count, API key presence.
+ * Use this to debug snapshot refresh issues.
+ */
+flowRouter.get("/health", (_req: Request, res: Response) => {
+  try {
+    const health = getWsHealth();
+    res.json(health);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message });
+  }
+});
 
 /**
  * GET /api/flow/status

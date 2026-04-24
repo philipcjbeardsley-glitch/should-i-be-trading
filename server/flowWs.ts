@@ -104,45 +104,116 @@ interface SnapshotEntry {
 
 const snapshotCache = new Map<string, SnapshotEntry>();
 const snapshotLastRefresh: Record<string, number> = {};
+// Health tracking — exposed via getWsHealth()
+const snapshotLastFetchStatus: Record<string, "ok" | "error" | "never"> = {};
+const snapshotLastError: Record<string, string> = {};
+let wsReconnectCount = 0;
+// Ring buffer of trade timestamps for "last hour" count
+const tradeTimestamps: number[] = [];
+
+function recordTrade(): void {
+  const now = Date.now();
+  tradeTimestamps.push(now);
+  // Trim entries older than 1 hour to keep memory bounded
+  const cutoff = now - 3_600_000;
+  while (tradeTimestamps.length > 0 && tradeTimestamps[0] < cutoff) {
+    tradeTimestamps.shift();
+  }
+}
 
 async function refreshSnapshot(underlying: string): Promise<void> {
-  if (!POLYGON_KEY) return;
+  if (!POLYGON_KEY) {
+    snapshotLastFetchStatus[underlying] = "error";
+    snapshotLastError[underlying] = "POLYGON_API_KEY not set";
+    console.error(`[flowWs] refreshSnapshot: POLYGON_API_KEY not set`);
+    return;
+  }
+
+  // Follow cursor pagination — v3/snapshot/options uses next_url when results > limit.
+  // For INTC (~150-250 contracts) one page is enough, but we follow up to 10 pages
+  // to handle larger chains without silently truncating.
+  const MAX_PAGES = 10;
+  let pageUrl: string | null =
+    `https://api.polygon.io/v3/snapshot/options/${underlying}?limit=250&apiKey=${POLYGON_KEY}`;
+  let totalCached = 0;
+  let pageNum = 0;
+
+  wsLog(`Snapshot fetch start: ${underlying} (key prefix: ${POLYGON_KEY.slice(0, 6)}...)`);
+
   try {
-    // Fetch up to 250 contracts per page. For large chains (SPY, QQQ) this
-    // may require pagination — add pagination in Layer 2 when expanding to
-    // index ETFs. For INTC, 250 covers the full active chain.
-    const url =
-      `https://api.polygon.io/v3/snapshot/options/${underlying}` +
-      `?limit=250&apiKey=${POLYGON_KEY}`;
-    const resp = await axios.get(url, { timeout: 10_000 });
-    const results: any[] = resp.data?.results ?? [];
+    while (pageUrl && pageNum < MAX_PAGES) {
+      pageNum++;
+      const resp: any = await axios.get(pageUrl, { timeout: 10_000 });
 
-    for (const r of results) {
-      const ticker: string = r.ticker;
-      if (!ticker) continue;
-      const lq = r.last_quote ?? {};
-      const bid = lq.bid ?? 0;
-      const ask = lq.ask ?? 0;
-      // Polygon returns last_updated in nanoseconds for some endpoints,
-      // milliseconds for others. Normalize: if > 1e15, divide by 1e6.
-      const rawTs: number = lq.last_updated ?? lq.sip_timestamp ?? 0;
-      const quoteTimestamp = rawTs > 1e15 ? Math.round(rawTs / 1e6) : rawTs;
+      // Log raw response shape on first page to catch schema drift
+      if (pageNum === 1) {
+        const shape = {
+          status: resp.data?.status,
+          resultsCount: resp.data?.results?.length ?? 0,
+          hasNextUrl: !!resp.data?.next_url,
+          firstTickerField: resp.data?.results?.[0]
+            ? { topLevel: resp.data.results[0].ticker, detailsLevel: resp.data.results[0].details?.ticker }
+            : null,
+        };
+        wsLog(`Snapshot response shape: ${JSON.stringify(shape)}`);
+      }
 
-      snapshotCache.set(ticker, {
-        bid,
-        ask,
-        mid: lq.midpoint ?? (bid + ask) / 2,
-        quoteTimestamp: quoteTimestamp || Date.now() - SNAPSHOT_TTL_MS,
-        oi: r.open_interest ?? 0,
-        iv: r.implied_volatility ?? 0,
-        delta: r.greeks?.delta ?? 0,
-      });
+      if (resp.data?.status && resp.data.status !== "OK") {
+        const errMsg = `Polygon returned status="${resp.data.status}" (request_id: ${resp.data.request_id ?? "?"})`;
+        wsLog(`[WARN] ${errMsg}`);
+        snapshotLastFetchStatus[underlying] = "error";
+        snapshotLastError[underlying] = errMsg;
+        return;
+      }
+
+      const results: any[] = resp.data?.results ?? [];
+      let pageCached = 0;
+
+      for (const r of results) {
+        // Polygon v3 snapshot has ticker at the top level AND inside details.
+        // Try top-level first; fall back to details.ticker in case of schema variation.
+        const ticker: string = r.ticker ?? r.details?.ticker ?? "";
+        if (!ticker) continue;
+
+        const lq = r.last_quote ?? {};
+        const bid = lq.bid ?? 0;
+        const ask = lq.ask ?? 0;
+        // Polygon returns last_updated in nanoseconds for some endpoints,
+        // milliseconds for others. Normalize: if > 1e15, divide by 1e6.
+        const rawTs: number = lq.last_updated ?? lq.sip_timestamp ?? 0;
+        const quoteTimestamp = rawTs > 1e15 ? Math.round(rawTs / 1e6) : rawTs;
+
+        snapshotCache.set(ticker, {
+          bid,
+          ask,
+          mid: lq.midpoint ?? (bid + ask) / 2,
+          quoteTimestamp: quoteTimestamp || Date.now() - SNAPSHOT_TTL_MS,
+          oi: r.open_interest ?? 0,
+          iv: r.implied_volatility ?? 0,
+          delta: r.greeks?.delta ?? 0,
+        });
+        pageCached++;
+      }
+
+      totalCached += pageCached;
+      wsLog(`Snapshot page ${pageNum}: ${underlying} — ${pageCached}/${results.length} contracts cached`);
+
+      // Follow next_url if present; append API key since Polygon strips it
+      const nextUrl: string | undefined = resp.data?.next_url;
+      pageUrl = nextUrl ? `${nextUrl}&apiKey=${POLYGON_KEY}` : null;
     }
 
     snapshotLastRefresh[underlying] = Date.now();
-    wsLog(`Snapshot refreshed: ${underlying} (${results.length} contracts cached)`);
+    snapshotLastFetchStatus[underlying] = "ok";
+    delete snapshotLastError[underlying];
+    wsLog(`Snapshot refreshed: ${underlying} — ${totalCached} total contracts cached (${pageNum} page(s))`);
   } catch (err: any) {
-    console.error(`[flowWs] Snapshot refresh failed for ${underlying}: ${err?.message}`);
+    const msg = err?.response
+      ? `HTTP ${err.response.status}: ${JSON.stringify(err.response.data)}`
+      : err?.message ?? String(err);
+    snapshotLastFetchStatus[underlying] = "error";
+    snapshotLastError[underlying] = msg;
+    console.error(`[flowWs] Snapshot refresh failed for ${underlying}: ${msg}`);
   }
 }
 
@@ -329,6 +400,9 @@ async function enrichAndEmit(raw: PolyTradeEvent): Promise<void> {
     console.error("[flowWs] DB insert failed:", err?.message);
   }
 
+  // Track for health endpoint
+  recordTrade();
+
   // Broadcast to all registered handlers (SSE broadcaster, tests, etc.)
   handlers.forEach(h => {
     try { h(trade); } catch { /* never let a broken handler kill ingestion */ }
@@ -421,6 +495,7 @@ function connectWs(): void {
     wsLog(`Connection closed (${code}: ${reason.toString() || "no reason"})`);
     wsState = "disconnected";
     ws = null;
+    wsReconnectCount++;
     scheduleReconnect();
   });
 
@@ -513,5 +588,36 @@ export function getWsStatus() {
           : "never",
       ])
     ),
+  };
+}
+
+/** Returns detailed health data for the /api/flow/health endpoint. */
+export function getWsHealth() {
+  const now = Date.now();
+  const oneHourAgo = now - 3_600_000;
+  const tradesLastHour = tradeTimestamps.filter(t => t > oneHourAgo).length;
+
+  const perUnderlying = Array.from(watchedUnderlyings).map(u => ({
+    underlying: u,
+    snapshotCacheSize: Array.from(snapshotCache.keys()).filter(k => {
+      const parsed = parseOCC(k);
+      return parsed?.underlying === u;
+    }).length,
+    lastFetchStatus: snapshotLastFetchStatus[u] ?? "never",
+    lastFetchAgoSec: snapshotLastRefresh[u]
+      ? Math.round((now - snapshotLastRefresh[u]) / 1_000)
+      : null,
+    lastError: snapshotLastError[u] ?? null,
+  }));
+
+  return {
+    wsState,
+    wsReconnectCount,
+    tradesReceivedLastHour: tradesLastHour,
+    snapshotCacheSizeTotal: snapshotCache.size,
+    polygonKeySet: !!POLYGON_KEY,
+    polygonKeyPrefix: POLYGON_KEY ? POLYGON_KEY.slice(0, 6) + "..." : null,
+    underlyings: perUnderlying,
+    timestamp: new Date().toISOString(),
   };
 }
